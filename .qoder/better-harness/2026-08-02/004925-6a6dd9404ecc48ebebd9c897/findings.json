@@ -1,0 +1,116 @@
+{
+  "summary": {
+    "projectName": "奥拉星立绘提取器",
+    "locale": "zh-CN",
+    "modelId": "agent-work-loop-v4",
+    "reportContractVersion": 25,
+    "overview": "项目具有清晰的模块划分和可用的启动/安装路径，但完全缺少 Agent 自定义层、自动化验证和会话可观测性，导致 Agent 行为无法被引导、验证或评估。",
+    "aiAgentPractice": {
+      "inspectedSurfaces": [],
+      "coverageRows": [
+        {
+          "surface": "Memories",
+          "scopes": [
+            "Project"
+          ],
+          "count": 2
+        },
+        {
+          "surface": "Custom Agents",
+          "scopes": [
+            "Project"
+          ],
+          "count": 0
+        }
+      ]
+    },
+    "assignmentSummaries": [],
+    "dimensions": [
+      {
+        "id": "task-understanding",
+        "label": "任务理解",
+        "score": 50,
+        "summary": "项目结构清晰，但无 AGENTS.md 或 Rules 文件为 Agent 提供项目边界和操作约束；零会话证据使上下文使用能力不可观测。",
+        "findingRefs": [
+          "session-behavior-unobservable"
+        ]
+      },
+      {
+        "id": "controlled-execution",
+        "label": "可控执行",
+        "score": 65,
+        "summary": "启动.bat 和 install.ps1 提供了可复现的启动路径，离线 wheels 确保依赖可用性；但无诊断命令和权限边界定义。",
+        "findingRefs": []
+      },
+      {
+        "id": "change-validation",
+        "label": "改动验证",
+        "score": 35,
+        "summary": "无测试、无 lint、无类型检查、无 CI——Agent 的任何代码变更都没有自动化验证手段。",
+        "findingRefs": [
+          "no-validation-route-for-agent-changes"
+        ]
+      },
+      {
+        "id": "reliable-delivery",
+        "label": "可靠交付",
+        "score": 40,
+        "summary": "非 Git 项目，无版本控制、无合并接受路径、无回滚机制；交付边界完全不可用。",
+        "findingRefs": []
+      },
+      {
+        "id": "learning-capture",
+        "label": "经验沉淀",
+        "score": 35,
+        "summary": "所有 Agent 自定义表面为零配置，无可复用的知识固化或过程路由；零会话使学习闭环完全不可评估。",
+        "findingRefs": [
+          "zero-agent-customization-layer"
+        ]
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "zero-agent-customization-layer",
+      "title": "项目无任何 Agent 自定义层，重复性操作流程缺乏结构化引导",
+      "severity": "Low",
+      "reason": "确定性清单显示 Skills、Rules/AGENTS.md、Commands、Hooks、Custom Agents、Plugins 均为零。项目具有明确的重复性流程（资源探测 → 下载 → Spine 导出 → 壁纸/GIF 打包），但无任何项目级知识固化或过程路由。Agent 在此项目上的所有行为完全依赖内置能力和即时指令。证据来自 Step 1 lint 和 inventory 信封（全零），置信度中等——零配置是确定性事实，但实际影响取决于使用频率和复杂度。",
+      "expectedOutput": [
+        "Agent 可读取项目级指导，了解模块边界和操作约束。"
+      ],
+      "expectedArtifact": "AGENTS.md",
+      "aiFixPrompt": "为此项目创建一个最小的 AGENTS.md，说明模块职责边界（aola_api.py vs core/）、启动命令（python main.py）、关键约束（Python 3.10+、PyQt5）和常见操作路径。",
+      "dimensionRefs": [
+        "learning-capture"
+      ]
+    },
+    {
+      "id": "no-validation-route-for-agent-changes",
+      "title": "项目无自动化验证路由，Agent 变更无法被检查",
+      "severity": "Low",
+      "reason": "代码检查确认无 tests/ 目录、无 .flake8/pyproject.toml/mypy.ini、无 CI 配置。Agent 若修改代码，没有任何自动化手段验证其行为正确性。main.py 1661 行包含至少 5 种职责，存在重复的颜色转换实现（WallpaperThread 和 MainWindow 各一套），无测试意味着此类重复只能通过人工对比发现。证据来自项目文件结构检查和源码审查，置信度中等——零验证是确定性事实，但是否构成实际风险取决于变更频率。",
+      "expectedOutput": [
+        "Agent 修改代码后可运行 pytest 验证核心逻辑未被破坏。"
+      ],
+      "expectedArtifact": "tests/",
+      "aiFixPrompt": "为核心模块添加最小测试：为 aola_api.py 的资源探测逻辑编写单元测试，为 core/url_config.py 的 URL 模板生成编写参数化测试。",
+      "dimensionRefs": [
+        "change-validation"
+      ]
+    },
+    {
+      "id": "session-behavior-unobservable",
+      "title": "会话证据完全缺失，Agent 行为模式不可评估",
+      "severity": "Low",
+      "reason": "7 天窗口内零合格会话，所有诊断标志均为'无证据'状态。source-coverage、validation-behavior、post-edit-validation、execution-friction 四个语义面均为 Low 置信度候选。这使本报告的所有行为维度评分受限于证据上限（≤59），且无法判断 Agent 自定义层的缺失是否实际造成了影响。证据来自 session-analysis facts 信封，置信度低——会话空白可能有采集层面的原因。",
+      "expectedOutput": [
+        "后续 Harness 分析可基于会话证据评估 Agent 行为模式和有效性。"
+      ],
+      "expectedArtifact": "会话数据",
+      "aiFixPrompt": "确保工作区的会话采集源根已正确配置，以便后续 Harness 分析能获取到足够的会话证据。",
+      "dimensionRefs": [
+        "task-understanding"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<base href="./">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>奥拉星立绘 · 动态壁纸</title>
+<style>
+    :root {
+        --neon-cyan: #00d4ff;
+        --neon-blue: #6366f1;
+        --neon-violet: #8b5cf6;
+        --neon-pink: #ec4899;
+        --neon-red: #ff4d6d;
+        --text-primary: #e8ecff;
+        --text-secondary: #a5abcf;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+    body { {{BG_CSS}} }
+
+    #canvas {
+        display: block; width: 100vw; height: 100vh;
+        background: transparent;
+        opacity: 0;
+        transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    #canvas.ready { opacity: 1; }
+
+    /* ===== 调试信息 (隐藏) ===== */
+    #info { display: none; }
+
+    /* ===== 加载遮罩层 ===== */
+    #loader {
+        position: fixed; inset: 0;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        gap: 28px;
+        z-index: 50;
+        background: rgba(8, 8, 22, 0.7);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        transition: opacity 0.6s ease, visibility 0.6s ease;
+    }
+    #loader.hide {
+        opacity: 0; visibility: hidden; pointer-events: none;
+    }
+
+    /* 霓虹圆环 Spinner */
+    .spinner {
+        position: relative;
+        width: 96px; height: 96px;
+    }
+    .spinner::before,
+    .spinner::after,
+    .spinner .ring-3 {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        border: 3px solid transparent;
+    }
+    .spinner::before {
+        border-top-color: var(--neon-cyan);
+        border-right-color: var(--neon-cyan);
+        box-shadow: 0 0 24px rgba(0, 212, 255, 0.45),
+                    inset 0 0 18px rgba(0, 212, 255, 0.12);
+        animation: spin 1.1s cubic-bezier(0.6, 0.2, 0.4, 0.8) infinite;
+    }
+    .spinner::after {
+        inset: 14px;
+        border-bottom-color: var(--neon-blue);
+        border-left-color: var(--neon-blue);
+        box-shadow: 0 0 18px rgba(99, 102, 241, 0.45),
+                    inset 0 0 14px rgba(99, 102, 241, 0.12);
+        animation: spin 1.6s cubic-bezier(0.4, 0.6, 0.8, 0.2) infinite reverse;
+    }
+    .spinner .ring-3 {
+        inset: 30px;
+        border-top-color: var(--neon-violet);
+        box-shadow: 0 0 12px rgba(139, 92, 246, 0.5);
+        animation: spin 0.9s ease-in-out infinite;
+    }
+    .spinner .core {
+        position: absolute;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        width: 12px; height: 12px;
+        border-radius: 50%;
+        background: radial-gradient(circle, #fff 0%, var(--neon-cyan) 60%, transparent 100%);
+        box-shadow: 0 0 20px var(--neon-cyan),
+                    0 0 40px var(--neon-blue);
+        animation: pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        50%      { opacity: 0.65; transform: translate(-50%, -50%) scale(0.75); }
+    }
+
+    /* 加载文字 */
+    .loader-text {
+        font-family: "Microsoft YaHei UI", "PingFang SC", sans-serif;
+        font-size: 15px; font-weight: 500;
+        color: var(--text-secondary);
+        letter-spacing: 0.5px;
+        text-align: center;
+    }
+    .loader-text strong {
+        background: linear-gradient(135deg,
+            var(--neon-cyan) 0%, var(--neon-blue) 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        font-weight: 700;
+    }
+    .loader-dots::after {
+        content: '';
+        display: inline-block;
+        width: 1.2em;
+        text-align: left;
+        animation: dots 1.4s steps(4, end) infinite;
+    }
+    @keyframes dots {
+        0%   { content: ''; }
+        25%  { content: '.'; }
+        50%  { content: '..'; }
+        75%  { content: '...'; }
+        100% { content: ''; }
+    }
+
+    /* 进度微光条 */
+    .loader-bar {
+        width: 200px; height: 3px;
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 3px;
+        overflow: hidden;
+        position: relative;
+    }
+    .loader-bar::after {
+        content: '';
+        position: absolute; inset: 0;
+        background: linear-gradient(90deg,
+            transparent 0%,
+            var(--neon-cyan) 30%,
+            var(--neon-blue) 60%,
+            transparent 100%);
+        background-size: 200% 100%;
+        box-shadow: 0 0 12px rgba(0, 212, 255, 0.5);
+        animation: slide 1.8s ease-in-out infinite;
+    }
+    @keyframes slide {
+        0%   { background-position: 200% 0; }
+        100% { background-position: -200% 0; }
+    }
+
+    /* ===== 错误提示 ===== */
+    #err {
+        position: fixed;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 100;
+        display: none;
+        max-width: 520px; width: 90%;
+        padding: 24px 28px 22px;
+        background: rgba(18, 10, 22, 0.96);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border: 1px solid rgba(255, 77, 109, 0.4);
+        border-radius: 14px;
+        box-shadow:
+            0 16px 48px rgba(0, 0, 0, 0.6),
+            0 0 0 1px rgba(255, 77, 109, 0.15),
+            0 0 40px rgba(255, 77, 109, 0.15);
+        animation: err-pop 0.5s cubic-bezier(0.16, 1.4, 0.3, 1) both;
+    }
+    @keyframes err-pop {
+        from { opacity: 0; transform: translate(-50%, -50%) scale(0.85); }
+        to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    }
+    #err.show { display: block; }
+
+    .err-head {
+        display: flex; align-items: center; gap: 12px;
+        margin-bottom: 14px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid rgba(255, 77, 109, 0.18);
+    }
+    .err-icon {
+        width: 34px; height: 34px;
+        flex-shrink: 0;
+        border-radius: 10px;
+        background: linear-gradient(135deg,
+            rgba(255, 77, 109, 0.25) 0%,
+            rgba(236, 72, 153, 0.25) 100%);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 18px;
+        box-shadow: 0 0 16px rgba(255, 77, 109, 0.25);
+    }
+    .err-title {
+        font-family: "Microsoft YaHei UI", sans-serif;
+        font-size: 15px; font-weight: 700;
+        color: #ff9fb3;
+        letter-spacing: 0.3px;
+    }
+    .err-body {
+        font-family: "Consolas", "JetBrains Mono", monospace;
+        font-size: 12.5px;
+        line-height: 1.6;
+        color: var(--text-secondary);
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-height: 48vh;
+        overflow: auto;
+        padding-right: 4px;
+    }
+    .err-body::-webkit-scrollbar { width: 6px; }
+    .err-body::-webkit-scrollbar-track { background: transparent; }
+    .err-body::-webkit-scrollbar-thumb {
+        background: rgba(255, 77, 109, 0.3);
+        border-radius: 3px;
+    }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+<div id="info">加载中...</div>
+
+<!-- 加载动画 -->
+<div id="loader">
+    <div class="spinner">
+        <div class="ring-3"></div>
+        <div class="core"></div>
+    </div>
+    <div>
+        <div class="loader-text">
+            <strong>渲染引擎启动中</strong>
+            <span class="loader-dots"></span>
+        </div>
+    </div>
+    <div class="loader-bar"></div>
+</div>
+
+<!-- 错误提示 -->
+<div id="err">
+    <div class="err-head">
+        <div class="err-icon">⚠</div>
+        <div class="err-title">渲染出现异常</div>
+    </div>
+    <div class="err-body" id="err-body"></div>
+</div>
+
+<!-- Spine WebGL Runtime 3.7 (本地离线) -->
+<script src="spine-webgl.js"></script>
+<script>
+// ===== 配置(由生成器填入) =====
+var SKEL_FILE = "{{SKEL_FILE}}";
+var ATLAS_FILE = "{{ATLAS_FILE}}";
+var TEXTURE_FILE = "{{TEXTURE_FILE}}";
+var SKEL_TYPE = "{{SKEL_TYPE}}";
+var CAMERA_SCALE = {{CAMERA_SCALE}};
+var CAMERA_OFFSET_X = {{CAMERA_OFFSET_X}};
+var CAMERA_OFFSET_Y = {{CAMERA_OFFSET_Y}};
+
+var infoEl = document.getElementById("info");
+var loaderEl = document.getElementById("loader");
+var canvasEl = document.getElementById("canvas");
+var errEl = document.getElementById("err");
+var errBodyEl = document.getElementById("err-body");
+
+function setLoaderText(html) {
+    var t = loaderEl.querySelector(".loader-text strong");
+    if (t) t.innerHTML = html;
+}
+
+function showError(msg) {
+    console.error(msg);
+    if (loaderEl) loaderEl.classList.add("hide");
+    errBodyEl.textContent = msg;
+    errEl.classList.add("show");
+    infoEl.textContent = "错误";
+}
+
+function hideLoader() {
+    if (loaderEl) {
+        loaderEl.classList.add("hide");
+        setTimeout(function() {
+            if (loaderEl && loaderEl.parentNode)
+                loaderEl.parentNode.removeChild(loaderEl);
+        }, 800);
+    }
+    if (canvasEl) canvasEl.classList.add("ready");
+}
+
+var canvas, gl, sceneRenderer, skeleton, state;
+var assetManager;
+var lastFrameTime = 0;
+
+// ===== 纹理预乘处理 =====
+function premultiplyImage(image) {
+    var w = image.width, h = image.height;
+    var tmpCanvas = document.createElement('canvas');
+    tmpCanvas.width = w; tmpCanvas.height = h;
+    var tmpCtx = tmpCanvas.getContext('2d');
+    tmpCtx.drawImage(image, 0, 0);
+    var imageData = tmpCtx.getImageData(0, 0, w, h);
+    var data = imageData.data;
+    for (var i = 0; i < data.length; i += 4) {
+        var a = data[i + 3] / 255;
+        data[i] = data[i] * a;
+        data[i + 1] = data[i + 1] * a;
+        data[i + 2] = data[i + 2] * a;
+    }
+    tmpCtx.putImageData(imageData, 0, 0);
+    return tmpCanvas;
+}
+
+function init() {
+    try {
+        canvas = document.getElementById("canvas");
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        gl = canvas.getContext("webgl", { alpha: true }) ||
+             canvas.getContext("experimental-webgl", { alpha: true });
+        if (!gl) { showError("WebGL 环境不支持"); return; }
+        setLoaderText("初始化 WebGL 渲染器");
+        sceneRenderer = new spine.webgl.SceneRenderer(canvas, gl, false);
+        assetManager = new spine.webgl.AssetManager(gl);
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = function () {
+            try {
+                setLoaderText("预处理纹理通道");
+                var premultipliedCanvas = premultiplyImage(img);
+                var glTexture = new spine.webgl.GLTexture(gl, premultipliedCanvas);
+                assetManager.assets[TEXTURE_FILE] = glTexture;
+                setLoaderText("加载骨架与图集资源");
+                assetManager.loadText(ATLAS_FILE);
+                if (SKEL_TYPE === "json") { assetManager.loadText(SKEL_FILE); }
+                else { assetManager.loadBinary(SKEL_FILE); }
+                requestAnimationFrame(load);
+            } catch (e) {
+                showError("纹理处理错误: " + e.message + (e.stack ? "\n" + e.stack : ""));
+            }
+        };
+        img.onerror = function () { showError("无法加载纹理资源: " + TEXTURE_FILE); };
+        img.src = TEXTURE_FILE;
+    } catch (e) {
+        showError("初始化错误: " + e.message + (e.stack ? "\n" + e.stack : ""));
+    }
+}
+
+function load() {
+    try {
+        if (assetManager.isLoadingComplete()) {
+            if (assetManager.hasErrors()) {
+                showError("资源加载错误: " + JSON.stringify(assetManager.getErrors()));
+                return;
+            }
+            setLoaderText("构建动画骨架");
+            var atlasText = assetManager.get(ATLAS_FILE);
+            var texture = assetManager.get(TEXTURE_FILE);
+            var textureLoader = function (pageName) { return texture; };
+            var atlas = new spine.TextureAtlas(atlasText, textureLoader);
+            var atlasLoader = new spine.AtlasAttachmentLoader(atlas);
+            var skeletonLoader = SKEL_TYPE === "json"
+                ? new spine.SkeletonJson(atlasLoader)
+                : new spine.SkeletonBinary(atlasLoader);
+            skeletonLoader.scale = 1.0;
+            var rawData = assetManager.get(SKEL_FILE);
+            var skeletonData = skeletonLoader.readSkeletonData(rawData);
+            skeleton = new spine.Skeleton(skeletonData);
+            state = new spine.AnimationState(
+                new spine.AnimationStateData(skeleton.data)
+            );
+            var anims = skeleton.data.animations;
+            if (anims && anims.length > 0) {
+                state.setAnimation(0, anims[0].name, true);
+                infoEl.textContent = "动画: " + anims[0].name + " (共" + anims.length + "个)";
+            }
+            skeleton.setToSetupPose();
+            skeleton.updateWorldTransform();
+            setupCamera();
+            lastFrameTime = Date.now() / 1000;
+            hideLoader();
+            requestAnimationFrame(render);
+        } else {
+            requestAnimationFrame(load);
+        }
+    } catch (e) {
+        showError("骨架解析错误: " + e.message + (e.stack ? "\n" + e.stack : ""));
+    }
+}
+
+function calculateBounds() {
+    var minX = Infinity, maxX = -Infinity;
+    var minY = Infinity, maxY = -Infinity;
+    var slots = skeleton.slots;
+    var hasVertices = false;
+    for (var i = 0; i < slots.length; i++) {
+        var slot = slots[i];
+        var attachment = slot.getAttachment();
+        if (!attachment) continue;
+        if (!(attachment instanceof spine.RegionAttachment) &&
+            !(attachment instanceof spine.MeshAttachment) &&
+            !(attachment instanceof spine.BoundingBoxAttachment)) continue;
+        var verticesLength = attachment.worldVerticesLength;
+        if (!verticesLength || verticesLength < 2) continue;
+        hasVertices = true;
+        var vertices = spine.Utils.newFloatArray(verticesLength);
+        attachment.computeWorldVertices(slot, 0, verticesLength, vertices, 0, 2);
+        for (var j = 0; j < verticesLength; j += 2) {
+            var x = vertices[j], y = vertices[j + 1];
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+    }
+    if (!hasVertices) {
+        for (var i = 0; i < slots.length; i++) {
+            var bone = slots[i].bone;
+            var x = bone.worldX, y = bone.worldY;
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+    }
+    if (minX === Infinity) { minX = 0; maxX = 1; minY = 0; maxY = 1; }
+    return { minX: minX, maxX: maxX, minY: minY, maxY: maxY };
+}
+
+function setupCamera() {
+    var b = calculateBounds();
+    var w = b.maxX - b.minX, h = b.maxY - b.minY;
+    var cx = (b.maxX + b.minX) / 2, cy = (b.maxY + b.minY) / 2;
+    infoEl.textContent += " 边界: " + Math.round(w) + "x" + Math.round(h) + " 中心:(" + Math.round(cx) + "," + Math.round(cy) + ")";
+    var camera = sceneRenderer.camera;
+    camera.position.x = cx; camera.position.y = cy; camera.position.z = 0;
+    var zoomH = h / (canvas.height * 0.85);
+    var zoomW = w / (canvas.width * 0.9);
+    var zoom = Math.max(zoomH, zoomW) * CAMERA_SCALE;
+    camera.zoom = zoom;
+    camera.position.x += CAMERA_OFFSET_X * zoom;
+    camera.position.y += CAMERA_OFFSET_Y * zoom;
+}
+
+function render() {
+    try {
+        var now = Date.now() / 1000;
+        var delta = now - lastFrameTime;
+        lastFrameTime = now;
+        state.update(delta);
+        state.apply(skeleton);
+        skeleton.updateWorldTransform();
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        sceneRenderer.begin();
+        sceneRenderer.drawSkeleton(skeleton, true);
+        sceneRenderer.end();
+        requestAnimationFrame(render);
+    } catch (e) {
+        showError("渲染错误: " + e.message + (e.stack ? "\n" + e.stack : ""));
+    }
+}
+
+window.addEventListener("resize", function() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    if (sceneRenderer) {
+        sceneRenderer.resize();
+        sceneRenderer.camera.setViewport(canvas.width, canvas.height);
+    }
+    if (skeleton) {
+        skeleton.setToSetupPose();
+        skeleton.updateWorldTransform();
+        setupCamera();
+    }
+});
+window.addEventListener("load", init);
+</script>
+</body>
+</html>

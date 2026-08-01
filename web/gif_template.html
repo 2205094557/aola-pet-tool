@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GIF 录制 · 奥拉星立绘工坊</title>
+<style>
+    /* ========== 设计变量 ========== */
+    :root {
+        --bg-0: #0a0a14;
+        --bg-1: #131326;
+        --bg-2: #1a1a32;
+        --panel: rgba(18, 18, 38, 0.78);
+        --panel-border: rgba(0, 212, 255, 0.22);
+        --panel-border-strong: rgba(0, 212, 255, 0.55);
+        --neon-cyan: #00d4ff;
+        --neon-blue: #6366f1;
+        --neon-violet: #8b5cf6;
+        --neon-pink: #ec4899;
+        --neon-green: #10e6a8;
+        --neon-red: #ff4d6d;
+        --text-primary: #e8ecff;
+        --text-secondary: #a5abcf;
+        --text-dim: #6b7098;
+        --shadow-neon: 0 0 24px rgba(0, 212, 255, 0.38),
+                       0 0 48px rgba(99, 102, 241, 0.22);
+        --shadow-card: 0 12px 48px rgba(0, 0, 0, 0.55),
+                       0 2px 8px rgba(0, 0, 0, 0.3);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+        width: 100%; height: 100%; overflow: hidden;
+        font-family: "Microsoft YaHei UI", "PingFang SC", sans-serif;
+        background:
+            radial-gradient(ellipse at 20% 20%, rgba(99,102,241,0.15) 0%, transparent 55%),
+            radial-gradient(ellipse at 85% 90%, rgba(0,212,255,0.12) 0%, transparent 50%),
+            linear-gradient(135deg, var(--bg-0) 0%, var(--bg-1) 100%);
+        color: var(--text-primary);
+    }
+
+    #canvas {
+        display: block;
+        background: {{BG_COLOR}};
+        position: absolute; inset: 0;
+        width: 100%; height: 100%;
+    }
+
+    /* ========== 背景装饰几何 ========== */
+    .bg-deco {
+        position: fixed; inset: 0; pointer-events: none; z-index: 1;
+        overflow: hidden;
+    }
+    .bg-deco::before, .bg-deco::after {
+        content: ''; position: absolute; border: 1px solid rgba(0,212,255,0.08);
+    }
+    .bg-deco::before {
+        top: -80px; left: -80px; width: 320px; height: 320px;
+        border-radius: 50%;
+        box-shadow: inset 0 0 60px rgba(99,102,241,0.06);
+    }
+    .bg-deco::after {
+        bottom: -120px; right: -120px; width: 480px; height: 480px;
+        border-radius: 50%;
+        box-shadow: inset 0 0 80px rgba(0,212,255,0.05);
+    }
+    .grid-lines {
+        position: absolute; inset: 0;
+        background-image:
+            linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+        background-size: 44px 44px;
+        mask-image: radial-gradient(ellipse at center, black 20%, transparent 75%);
+    }
+
+    /* ========== 控制条 - 毛玻璃卡片 ========== */
+    #controls {
+        position: fixed;
+        top: 20px; left: 50%;
+        transform: translateX(-50%);
+        z-index: 100;
+        display: flex; gap: 18px; align-items: center;
+        padding: 14px 22px;
+        background: var(--panel);
+        backdrop-filter: blur(18px) saturate(140%);
+        -webkit-backdrop-filter: blur(18px) saturate(140%);
+        border: 1px solid var(--panel-border);
+        border-radius: 14px;
+        box-shadow:
+            var(--shadow-card),
+            var(--shadow-neon),
+            inset 0 1px 0 rgba(255,255,255,0.05);
+        animation: panel-slide-in 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    @keyframes panel-slide-in {
+        from { opacity: 0; transform: translate(-50%, -24px) scale(0.96); }
+        to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
+    }
+
+    /* 霓虹边框光效 */
+    #controls::before {
+        content: ''; position: absolute; inset: -1px;
+        border-radius: 14px;
+        background: linear-gradient(135deg,
+            rgba(0,212,255,0.55) 0%,
+            rgba(99,102,241,0.55) 45%,
+            rgba(139,92,246,0.55) 100%);
+        z-index: -1;
+        opacity: 0.45;
+        filter: blur(1px);
+        animation: border-shimmer 4s ease-in-out infinite;
+    }
+    @keyframes border-shimmer {
+        0%, 100% { opacity: 0.35; }
+        50%      { opacity: 0.65; }
+    }
+
+    .ctrl-group {
+        display: flex; align-items: center; gap: 8px;
+        padding: 4px 12px 4px 10px;
+        background: rgba(255,255,255,0.025);
+        border: 1px solid rgba(255,255,255,0.05);
+        border-radius: 10px;
+    }
+    .ctrl-group label {
+        font-size: 12px; color: var(--text-secondary);
+        letter-spacing: 0.3px; font-weight: 500;
+    }
+    .ctrl-group .times {
+        color: var(--neon-cyan); font-weight: 600;
+        text-shadow: 0 0 8px rgba(0,212,255,0.45);
+    }
+    .ctrl-group input[type="number"] {
+        width: 66px;
+        padding: 6px 10px;
+        background: rgba(10, 10, 25, 0.85);
+        border: 1px solid rgba(0,212,255,0.18);
+        border-radius: 7px;
+        color: var(--text-primary);
+        font-size: 13px; font-weight: 600;
+        font-family: inherit;
+        text-align: center;
+        transition: all 0.2s ease;
+    }
+    .ctrl-group input[type="number"]:hover {
+        border-color: rgba(0,212,255,0.4);
+    }
+    .ctrl-group input[type="number"]:focus {
+        outline: none;
+        border-color: var(--neon-cyan);
+        box-shadow: 0 0 0 3px rgba(0,212,255,0.14),
+                    0 0 14px rgba(0,212,255,0.25);
+    }
+    .ctrl-group input[type="number"]::-webkit-inner-spin-button,
+    .ctrl-group input[type="number"]::-webkit-outer-spin-button {
+        opacity: 0.5;
+    }
+
+    /* ========== 录制按钮 - 霓虹发光 ========== */
+    #record-btn {
+        position: relative;
+        padding: 10px 22px;
+        border: none;
+        border-radius: 10px;
+        font-family: inherit;
+        font-size: 13.5px; font-weight: 700;
+        letter-spacing: 0.5px;
+        color: #04121c;
+        background: linear-gradient(135deg,
+            var(--neon-cyan) 0%,
+            var(--neon-blue) 100%);
+        cursor: pointer;
+        box-shadow:
+            0 0 0 1px rgba(0,212,255,0.3),
+            0 4px 20px rgba(0,212,255,0.35),
+            0 8px 32px rgba(99,102,241,0.25),
+            inset 0 1px 0 rgba(255,255,255,0.3);
+        transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+        overflow: hidden;
+    }
+    #record-btn::before {
+        content: ''; position: absolute; inset: 0;
+        background: linear-gradient(120deg,
+            transparent 20%,
+            rgba(255,255,255,0.4) 50%,
+            transparent 80%);
+        transform: translateX(-120%);
+        transition: transform 0.8s ease;
+    }
+    #record-btn:hover:not(:disabled)::before {
+        transform: translateX(120%);
+    }
+    #record-btn:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow:
+            0 0 0 1px rgba(0,212,255,0.5),
+            0 6px 28px rgba(0,212,255,0.5),
+            0 14px 44px rgba(99,102,241,0.35),
+            inset 0 1px 0 rgba(255,255,255,0.4);
+    }
+    #record-btn:active:not(:disabled) {
+        transform: translateY(0);
+    }
+    #record-btn:disabled {
+        background: linear-gradient(135deg, #2a2d44 0%, #1d1f30 100%);
+        color: var(--text-dim);
+        cursor: not-allowed;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+    #record-btn.recording {
+        background: linear-gradient(135deg,
+            var(--neon-red) 0%,
+            #f97316 100%);
+        color: #fff;
+        animation: record-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes record-pulse {
+        0%, 100% { box-shadow: 0 0 0 1px rgba(255,77,109,0.3), 0 0 0 0 rgba(255,77,109,0.5), 0 4px 20px rgba(255,77,109,0.3); }
+        50%      { box-shadow: 0 0 0 1px rgba(255,77,109,0.5), 0 0 0 10px rgba(255,77,109,0),   0 6px 28px rgba(255,77,109,0.5); }
+    }
+
+    /* ========== 进度条卡片 ========== */
+    #progress-container {
+        position: fixed;
+        top: 96px; left: 50%;
+        transform: translateX(-50%);
+        z-index: 100;
+        display: none;
+        min-width: 380px;
+        padding: 16px 22px;
+        background: var(--panel);
+        backdrop-filter: blur(18px) saturate(140%);
+        -webkit-backdrop-filter: blur(18px) saturate(140%);
+        border: 1px solid var(--panel-border);
+        border-radius: 14px;
+        box-shadow: var(--shadow-card), var(--shadow-neon);
+        animation: panel-slide-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    #progress-text {
+        text-align: center;
+        font-size: 13px; font-weight: 500;
+        color: var(--text-secondary);
+        margin-bottom: 12px;
+        letter-spacing: 0.3px;
+    }
+    #progress-text strong {
+        color: var(--neon-cyan);
+        text-shadow: 0 0 8px rgba(0,212,255,0.4);
+    }
+    #progress-bar {
+        position: relative;
+        width: 100%; height: 10px;
+        background: rgba(10, 10, 25, 0.9);
+        border: 1px solid rgba(0,212,255,0.15);
+        border-radius: 10px;
+        overflow: hidden;
+    }
+    #progress-fill {
+        position: absolute; inset: 0;
+        width: 0%;
+        background: linear-gradient(90deg,
+            var(--neon-cyan) 0%,
+            var(--neon-blue) 40%,
+            var(--neon-green) 100%);
+        border-radius: 10px;
+        transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        box-shadow: 0 0 16px rgba(0,212,255,0.5);
+    }
+    #progress-fill::after {
+        content: ''; position: absolute; inset: 0;
+        background: linear-gradient(90deg,
+            transparent 0%,
+            rgba(255,255,255,0.4) 50%,
+            transparent 100%);
+        animation: shimmer 1.5s linear infinite;
+    }
+    @keyframes shimmer {
+        from { transform: translateX(-100%); }
+        to   { transform: translateX(100%); }
+    }
+
+    /* ========== 底部状态胶囊 ========== */
+    #status {
+        position: fixed;
+        bottom: 24px; left: 50%;
+        transform: translateX(-50%);
+        z-index: 100;
+        padding: 9px 20px 9px 36px;
+        background: var(--panel);
+        backdrop-filter: blur(16px) saturate(140%);
+        -webkit-backdrop-filter: blur(16px) saturate(140%);
+        border: 1px solid var(--panel-border);
+        border-radius: 100px;
+        font-size: 12.5px; font-weight: 500;
+        color: var(--text-secondary);
+        letter-spacing: 0.25px;
+        box-shadow: var(--shadow-card),
+                    0 0 18px rgba(0,212,255,0.12);
+        animation: status-slide-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+        max-width: 85vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    @keyframes status-slide-in {
+        from { opacity: 0; transform: translate(-50%, 24px); }
+        to   { opacity: 1; transform: translate(-50%, 0); }
+    }
+    #status::before {
+        content: ''; position: absolute;
+        left: 14px; top: 50%; transform: translateY(-50%);
+        width: 8px; height: 8px;
+        border-radius: 50%;
+        background: var(--neon-cyan);
+        box-shadow: 0 0 10px var(--neon-cyan);
+        animation: dot-blink 1.4s ease-in-out infinite;
+    }
+    @keyframes dot-blink {
+        0%, 100% { opacity: 1; transform: translateY(-50%) scale(1); }
+        50%      { opacity: 0.4; transform: translateY(-50%) scale(0.75); }
+    }
+
+    /* ========== 下载完成弹窗 ========== */
+    #download-container {
+        position: fixed;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%) scale(0.94);
+        z-index: 200;
+        display: none;
+        padding: 28px 30px 24px;
+        min-width: 380px;
+        max-width: 90%;
+        text-align: center;
+        background: var(--panel);
+        backdrop-filter: blur(22px) saturate(160%);
+        -webkit-backdrop-filter: blur(22px) saturate(160%);
+        border: 1px solid var(--panel-border-strong);
+        border-radius: 18px;
+        box-shadow:
+            var(--shadow-card),
+            0 0 60px rgba(0,212,255,0.25),
+            0 0 120px rgba(99,102,241,0.15);
+    }
+    #download-container.show {
+        display: block;
+        animation: modal-pop 0.45s cubic-bezier(0.16, 1.4, 0.3, 1) both;
+    }
+    @keyframes modal-pop {
+        from { opacity: 0; transform: translate(-50%, -50%) scale(0.8); }
+        to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    }
+
+    #download-container h3 {
+        font-size: 18px; font-weight: 700;
+        margin-bottom: 18px;
+        letter-spacing: 0.4px;
+        background: linear-gradient(135deg,
+            var(--neon-green) 0%,
+            var(--neon-cyan) 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+    #download-container img {
+        display: block;
+        max-width: 280px; max-height: 200px;
+        width: auto; height: auto;
+        margin: 0 auto 18px;
+        border-radius: 12px;
+        background: #fff;
+        box-shadow:
+            0 8px 32px rgba(0,0,0,0.45),
+            0 0 0 1px rgba(0,212,255,0.25),
+            0 0 32px rgba(0,212,255,0.18);
+        object-fit: contain;
+    }
+    .dl-btn-row {
+        display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+    }
+    .dl-btn-row button {
+        padding: 10px 22px;
+        border: none; border-radius: 10px;
+        font-family: inherit;
+        font-size: 13.5px; font-weight: 700;
+        letter-spacing: 0.3px;
+        cursor: pointer;
+        transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .dl-btn-row .primary-btn {
+        background: linear-gradient(135deg,
+            var(--neon-green) 0%,
+            var(--neon-cyan) 100%);
+        color: #041c16;
+        box-shadow:
+            0 0 0 1px rgba(16,230,168,0.35),
+            0 6px 24px rgba(16,230,168,0.3),
+            inset 0 1px 0 rgba(255,255,255,0.3);
+    }
+    .dl-btn-row .primary-btn:hover {
+        transform: translateY(-1px);
+        box-shadow:
+            0 0 0 1px rgba(16,230,168,0.55),
+            0 10px 36px rgba(16,230,168,0.45),
+            inset 0 1px 0 rgba(255,255,255,0.4);
+    }
+    .dl-btn-row .close-btn {
+        background: rgba(255,255,255,0.05);
+        color: var(--text-secondary);
+        border: 1px solid rgba(255,255,255,0.08);
+    }
+    .dl-btn-row .close-btn:hover {
+        background: rgba(255,255,255,0.1);
+        color: var(--text-primary);
+        border-color: rgba(255,255,255,0.15);
+    }
+
+    /* 遮罩层 */
+    .modal-mask {
+        position: fixed; inset: 0; z-index: 190;
+        background: rgba(4, 6, 20, 0.65);
+        backdrop-filter: blur(6px);
+        display: none;
+    }
+    .modal-mask.show { display: block; }
+
+    /* 响应式 */
+    @media (max-width: 720px) {
+        #controls {
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 12px 16px;
+            max-width: calc(100vw - 24px);
+        }
+        .ctrl-group { padding: 3px 8px; }
+        #progress-container { min-width: calc(100vw - 48px); }
+        #download-container { min-width: calc(100vw - 48px); padding: 20px; }
+    }
+</style>
+</head>
+<body>
+
+<div class="bg-deco"><div class="grid-lines"></div></div>
+<canvas id="canvas"></canvas>
+
+<div id="controls">
+    <div class="ctrl-group">
+        <label>尺寸</label>
+        <input type="number" id="width-input" value="{{GIF_WIDTH}}" min="100" max="2000" step="50">
+        <span class="times">×</span>
+        <input type="number" id="height-input" value="{{GIF_HEIGHT}}" min="100" max="2000" step="50">
+    </div>
+    <div class="ctrl-group">
+        <label>时长</label>
+        <input type="number" id="duration-input" value="3" min="1" max="10" step="0.5">
+        <label style="color:var(--text-dim)">秒</label>
+    </div>
+    <div class="ctrl-group">
+        <label>FPS</label>
+        <input type="number" id="fps-input" value="12" min="5" max="30" step="1">
+    </div>
+    <button id="record-btn">🎬 开始录制 GIF</button>
+</div>
+
+<div id="progress-container">
+    <div id="progress-text">准备录制中...</div>
+    <div id="progress-bar"><div id="progress-fill"></div></div>
+</div>
+
+<div id="status">初始化渲染引擎...</div>
+
+<div class="modal-mask" id="modal-mask"></div>
+<div id="download-container">
+    <h3>✦ GIF 生成完成</h3>
+    <img id="gif-preview" alt="GIF 预览">
+    <div class="dl-btn-row">
+        <button class="primary-btn" onclick="document.getElementById('gif-download').click()">⬇ 下载 GIF</button>
+        <button class="close-btn" onclick="closeDlModal()">关闭</button>
+    </div>
+    <a id="gif-download" style="display:none;"></a>
+</div>
+
+<script src="spine-webgl.js"></script>
+<script>
+var SKEL_FILE = "{{SKEL_FILE}}";
+var ATLAS_FILE = "{{ATLAS_FILE}}";
+var TEXTURE_FILE = "{{TEXTURE_FILE}}";
+var SKEL_TYPE = "{{SKEL_TYPE}}";
+var BG_COLOR = "{{BG_COLOR}}";
+var CAMERA_SCALE = {{CAMERA_SCALE}};
+var CAMERA_OFFSET_X = {{CAMERA_OFFSET_X}};
+var CAMERA_OFFSET_Y = {{CAMERA_OFFSET_Y}};
+
+var statusEl = document.getElementById("status");
+var recordBtn = document.getElementById("record-btn");
+var canvas, gl, sceneRenderer, skeleton, state;
+var assetManager;
+var lastFrameTime = 0;
+var isReady = false;
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+function closeDlModal() {
+    document.getElementById("download-container").classList.remove("show");
+    document.getElementById("modal-mask").classList.remove("show");
+}
+document.getElementById("modal-mask").addEventListener("click", closeDlModal);
+
+function premultiplyImage(image) {
+    var w = image.width, h = image.height;
+    var tmpCanvas = document.createElement('canvas');
+    tmpCanvas.width = w; tmpCanvas.height = h;
+    var tmpCtx = tmpCanvas.getContext('2d');
+    tmpCtx.drawImage(image, 0, 0);
+    var imageData = tmpCtx.getImageData(0, 0, w, h);
+    var data = imageData.data;
+    for (var i = 0; i < data.length; i += 4) {
+        var a = data[i + 3] / 255;
+        data[i] = data[i] * a;
+        data[i + 1] = data[i + 1] * a;
+        data[i + 2] = data[i + 2] * a;
+    }
+    tmpCtx.putImageData(imageData, 0, 0);
+    return tmpCanvas;
+}
+
+function init() {
+    try {
+        canvas = document.getElementById("canvas");
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        gl = canvas.getContext("webgl", { alpha: true }) ||
+             canvas.getContext("experimental-webgl", { alpha: true });
+        if (!gl) { setStatus("WebGL 环境不支持"); return; }
+        setStatus("初始化 WebGL 渲染器...");
+        sceneRenderer = new spine.webgl.SceneRenderer(canvas, gl, false);
+        assetManager = new spine.webgl.AssetManager(gl);
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = function () {
+            try {
+                setStatus("预处理纹理通道...");
+                var premultipliedCanvas = premultiplyImage(img);
+                var glTexture = new spine.webgl.GLTexture(gl, premultipliedCanvas);
+                assetManager.assets[TEXTURE_FILE] = glTexture;
+                setStatus("加载骨架与图集资源...");
+                assetManager.loadText(ATLAS_FILE);
+                if (SKEL_TYPE === "json") { assetManager.loadText(SKEL_FILE); }
+                else { assetManager.loadBinary(SKEL_FILE); }
+                requestAnimationFrame(load);
+            } catch (e) {
+                setStatus("纹理处理失败: " + e.message);
+            }
+        };
+        img.onerror = function () { setStatus("无法加载纹理资源"); };
+        img.src = TEXTURE_FILE;
+    } catch (e) {
+        setStatus("初始化失败: " + e.message);
+    }
+}
+
+function load() {
+    try {
+        if (assetManager.isLoadingComplete()) {
+            if (assetManager.hasErrors()) {
+                setStatus("资源加载错误: " + JSON.stringify(assetManager.getErrors()));
+                return;
+            }
+            var atlasText = assetManager.get(ATLAS_FILE);
+            var texture = assetManager.get(TEXTURE_FILE);
+            var textureLoader = function (pageName) { return texture; };
+            var atlas = new spine.TextureAtlas(atlasText, textureLoader);
+            var atlasLoader = new spine.AtlasAttachmentLoader(atlas);
+            var skeletonLoader = SKEL_TYPE === "json"
+                ? new spine.SkeletonJson(atlasLoader)
+                : new spine.SkeletonBinary(atlasLoader);
+            skeletonLoader.scale = 1.0;
+            var rawData = assetManager.get(SKEL_FILE);
+            var skeletonData = skeletonLoader.readSkeletonData(rawData);
+            skeleton = new spine.Skeleton(skeletonData);
+            state = new spine.AnimationState(
+                new spine.AnimationStateData(skeleton.data)
+            );
+            var anims = skeleton.data.animations;
+            if (anims && anims.length > 0) {
+                state.setAnimation(0, anims[0].name, true);
+                setStatus("就绪 · " + anims[0].name + " · 共 " + anims.length + " 组动画");
+            }
+            skeleton.setToSetupPose();
+            skeleton.updateWorldTransform();
+            setupCamera();
+            isReady = true;
+            recordBtn.disabled = false;
+            lastFrameTime = Date.now() / 1000;
+            requestAnimationFrame(render);
+        } else {
+            requestAnimationFrame(load);
+        }
+    } catch (e) {
+        setStatus("骨架解析失败: " + e.message);
+    }
+}
+
+function calculateBounds() {
+    var minX = Infinity, maxX = -Infinity;
+    var minY = Infinity, maxY = -Infinity;
+    var slots = skeleton.slots;
+    var hasVertices = false;
+    for (var i = 0; i < slots.length; i++) {
+        var slot = slots[i];
+        var attachment = slot.getAttachment();
+        if (!attachment) continue;
+        if (!(attachment instanceof spine.RegionAttachment) &&
+            !(attachment instanceof spine.MeshAttachment) &&
+            !(attachment instanceof spine.BoundingBoxAttachment)) continue;
+        var verticesLength = attachment.worldVerticesLength;
+        if (!verticesLength || verticesLength < 2) continue;
+        hasVertices = true;
+        var vertices = spine.Utils.newFloatArray(verticesLength);
+        attachment.computeWorldVertices(slot, 0, verticesLength, vertices, 0, 2);
+        for (var j = 0; j < verticesLength; j += 2) {
+            var x = vertices[j], y = vertices[j + 1];
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+    }
+    if (!hasVertices) {
+        for (var i = 0; i < slots.length; i++) {
+            var bone = slots[i].bone;
+            var x = bone.worldX, y = bone.worldY;
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+    }
+    if (minX === Infinity) { minX = 0; maxX = 1; minY = 0; maxY = 1; }
+    return { minX: minX, maxX: maxX, minY: minY, maxY: maxY };
+}
+
+function setupCamera() {
+    var b = calculateBounds();
+    var w = b.maxX - b.minX, h = b.maxY - b.minY;
+    var cx = (b.maxX + b.minX) / 2, cy = (b.maxY + b.minY) / 2;
+    var camera = sceneRenderer.camera;
+    camera.position.x = cx; camera.position.y = cy; camera.position.z = 0;
+    var zoomH = h / (canvas.height * 0.85);
+    var zoomW = w / (canvas.width * 0.9);
+    var zoom = Math.max(zoomH, zoomW) * CAMERA_SCALE;
+    camera.zoom = zoom;
+    camera.position.x += CAMERA_OFFSET_X * zoom;
+    camera.position.y += CAMERA_OFFSET_Y * zoom;
+}
+
+function render() {
+    try {
+        var now = Date.now() / 1000;
+        var delta = now - lastFrameTime;
+        lastFrameTime = now;
+        state.update(delta);
+        state.apply(skeleton);
+        skeleton.updateWorldTransform();
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        sceneRenderer.begin();
+        sceneRenderer.drawSkeleton(skeleton, true);
+        sceneRenderer.end();
+        requestAnimationFrame(render);
+    } catch (e) {
+        setStatus("渲染错误: " + e.message);
+    }
+}
+
+function sendFrameToServer(frameDataUrl, frameIndex, totalFrames) {
+    return new Promise(function(resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/upload-frame", true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.timeout = 30000;
+        xhr.onload = function() {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                resolve(JSON.parse(xhr.responseText));
+            } else { reject(new Error("上传失败: HTTP " + xhr.status)); }
+        };
+        xhr.onerror = function() { reject(new Error("网络连接错误")); };
+        xhr.ontimeout = function() { reject(new Error("上传超时")); };
+        var data = JSON.stringify({
+            frame_index: frameIndex, total_frames: totalFrames, data_url: frameDataUrl
+        });
+        xhr.send(data);
+    });
+}
+
+function requestGifGeneration(totalFrames, fps, width, height, bgColor) {
+    return new Promise(function(resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/generate-gif", true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.timeout = 120000;
+        xhr.onload = function() {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                resolve(JSON.parse(xhr.responseText));
+            } else { reject(new Error("GIF 生成失败: HTTP " + xhr.status)); }
+        };
+        xhr.onerror = function() { reject(new Error("网络连接错误")); };
+        xhr.ontimeout = function() { reject(new Error("GIF 生成超时")); };
+        var data = JSON.stringify({
+            total_frames: totalFrames, fps: fps, width: width,
+            height: height, bg_color: bgColor
+        });
+        xhr.send(data);
+    });
+}
+
+recordBtn.addEventListener("click", async function() {
+    if (!isReady) return;
+    recordBtn.disabled = true;
+    recordBtn.textContent = "⏺ 录制进行中";
+    recordBtn.classList.add("recording");
+    var width = parseInt(document.getElementById("width-input").value);
+    var height = parseInt(document.getElementById("height-input").value);
+    var duration = parseFloat(document.getElementById("duration-input").value);
+    var fps = parseInt(document.getElementById("fps-input").value);
+    var totalFrames = Math.ceil(duration * fps);
+
+    var progressContainer = document.getElementById("progress-container");
+    var progressFill = document.getElementById("progress-fill");
+    var progressText = document.getElementById("progress-text");
+    progressContainer.style.display = "block";
+
+    try {
+        progressText.innerHTML = "构建录制画布 <strong>0</strong>/" + totalFrames;
+        var offscreenCanvas = document.createElement('canvas');
+        offscreenCanvas.width = width; offscreenCanvas.height = height;
+        var offscreenCtx = offscreenCanvas.getContext('2d');
+        var targetCanvas = document.createElement('canvas');
+        targetCanvas.width = width; targetCanvas.height = height;
+        var targetGl = targetCanvas.getContext('webgl', { alpha: true });
+        var targetSceneRenderer = new spine.webgl.SceneRenderer(targetCanvas, targetGl, false);
+        targetSceneRenderer.camera.position.x = sceneRenderer.camera.position.x;
+        targetSceneRenderer.camera.position.y = sceneRenderer.camera.position.y;
+        targetSceneRenderer.camera.zoom = sceneRenderer.camera.zoom;
+        var targetAssetManager = new spine.webgl.AssetManager(targetGl);
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.src = TEXTURE_FILE;
+        await new Promise(function(resolve) {
+            img.onload = function() {
+                var premultipliedCanvas = premultiplyImage(img);
+                var targetGlTexture = new spine.webgl.GLTexture(targetGl, premultipliedCanvas);
+                targetAssetManager.assets[TEXTURE_FILE] = targetGlTexture;
+                targetAssetManager.loadText(ATLAS_FILE);
+                if (SKEL_TYPE === "json") { targetAssetManager.loadText(SKEL_FILE); }
+                else { targetAssetManager.loadBinary(SKEL_FILE); }
+                function waitLoad() {
+                    if (targetAssetManager.isLoadingComplete()) {
+                        var atlasText = targetAssetManager.get(ATLAS_FILE);
+                        var texture = targetAssetManager.get(TEXTURE_FILE);
+                        var textureLoader = function(pageName) { return texture; };
+                        var atlas = new spine.TextureAtlas(atlasText, textureLoader);
+                        var atlasLoader = new spine.AtlasAttachmentLoader(atlas);
+                        var skeletonLoader = SKEL_TYPE === "json"
+                            ? new spine.SkeletonJson(atlasLoader)
+                            : new spine.SkeletonBinary(atlasLoader);
+                        var rawData = targetAssetManager.get(SKEL_FILE);
+                        var skeletonData = skeletonLoader.readSkeletonData(rawData);
+                        var targetSkeleton = new spine.Skeleton(skeletonData);
+                        var targetState = new spine.AnimationState(
+                            new spine.AnimationStateData(targetSkeleton.data)
+                        );
+                        var anims = targetSkeleton.data.animations;
+                        if (anims && anims.length > 0) {
+                            targetState.setAnimation(0, anims[0].name, true);
+                        }
+                        targetSkeleton.setToSetupPose();
+                        targetSkeleton.updateWorldTransform();
+                        window._targetSkeleton = targetSkeleton;
+                        window._targetState = targetState;
+                        resolve();
+                    } else { setTimeout(waitLoad, 50); }
+                }
+                waitLoad();
+            };
+        });
+        var targetSkeleton = window._targetSkeleton;
+        var targetState = window._targetState;
+
+        for (var frame = 0; frame < totalFrames; frame++) {
+            targetState.update(1 / fps);
+            targetState.apply(targetSkeleton);
+            targetSkeleton.updateWorldTransform();
+            targetGl.clearColor(0, 0, 0, 0);
+            targetGl.clear(targetGl.COLOR_BUFFER_BIT);
+            targetSceneRenderer.begin();
+            targetSceneRenderer.drawSkeleton(targetSkeleton, true);
+            targetSceneRenderer.end();
+            offscreenCtx.fillStyle = BG_COLOR || '#000000';
+            offscreenCtx.fillRect(0, 0, width, height);
+            offscreenCtx.drawImage(targetCanvas, 0, 0, width, height);
+            var frameDataUrl = offscreenCanvas.toDataURL('image/png');
+            await sendFrameToServer(frameDataUrl, frame, totalFrames);
+            var pct = Math.round((frame + 1) / totalFrames * 80);
+            progressFill.style.width = pct + "%";
+            progressText.innerHTML = "上传帧数据 <strong>" + (frame + 1) + "</strong>/" + totalFrames;
+            await new Promise(function(r) { setTimeout(r, 25); });
+        }
+
+        progressText.innerHTML = "服务端合成 <strong>GIF</strong>...";
+        progressFill.style.width = "88%";
+        var result = await requestGifGeneration(totalFrames, fps, width, height, BG_COLOR);
+        progressFill.style.width = "100%";
+        progressText.innerHTML = "<strong>完成!</strong>";
+
+        var dlContainer = document.getElementById("download-container");
+        var modalMask = document.getElementById("modal-mask");
+        var gifPreview = document.getElementById("gif-preview");
+        var gifDownload = document.getElementById("gif-download");
+        gifPreview.src = "/get-gif?t=" + Date.now();
+        gifDownload.href = "/get-gif?t=" + Date.now();
+        gifDownload.download = result.filename || ("aola_gif_" + Date.now() + ".gif");
+        dlContainer.classList.add("show");
+        modalMask.classList.add("show");
+
+        setTimeout(function() { progressContainer.style.display = "none"; }, 700);
+        setStatus("✓ GIF 生成完成");
+
+    } catch (e) {
+        setStatus("录制错误: " + e.message);
+        console.error(e);
+        progressText.innerHTML = "<span style='color:#ff4d6d'>失败: " + e.message + "</span>";
+        setTimeout(function() { progressContainer.style.display = "none"; }, 2500);
+    } finally {
+        recordBtn.disabled = false;
+        recordBtn.textContent = "🎬 开始录制 GIF";
+        recordBtn.classList.remove("recording");
+    }
+});
+
+window.addEventListener("resize", function() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    if (sceneRenderer) {
+        sceneRenderer.resize();
+        sceneRenderer.camera.setViewport(canvas.width, canvas.height);
+    }
+    if (skeleton) {
+        skeleton.setToSetupPose();
+        skeleton.updateWorldTransform();
+        setupCamera();
+    }
+});
+window.addEventListener("load", init);
+</script>
+</body>
+</html>

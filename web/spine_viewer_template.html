@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>奥拉星立绘壁纸</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+        width: 100%; height: 100%; overflow: hidden;
+        background: #000;
+    }
+    #canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+    }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<!-- Spine WebGL Runtime 3.7 (奥拉星用的是3.7.89) -->
+<script src="https://cdn.jsdelivr.net/npm/spine-webgl@3.7.107/build/spine-webgl.min.js"></script>
+<script>
+// ===== 配置(由 spine_exporter.py 填入) =====
+var SKEL_FILE = "{{SKEL_FILE}}";
+var ATLAS_FILE = "{{ATLAS_FILE}}";
+var SKEL_TYPE = "{{SKEL_TYPE}}"; // "json" 或 "binary"
+
+var canvas, gl, shader, batcher, mvp, skeleton, state, bounds;
+var assetManager;
+var lastFrameTime = 0;
+
+function init() {
+    canvas = document.getElementById("canvas");
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    gl = canvas.getContext("webgl", { alpha: false });
+    if (!gl) { console.error("WebGL不支持"); return; }
+
+    mvp = new spine.webgl.Matrix4();
+    shader = spine.webgl.Shader.newTwoColoredTextured(gl);
+    batcher = new spine.webgl.PolygonBatcher(gl);
+    bounds = new spine.webgl.SkeletonBounds();
+
+    assetManager = new spine.webgl.AssetManager(gl);
+
+    // 加载资源
+    assetManager.loadTextureAtlas(ATLAS_FILE);
+    if (SKEL_TYPE === "json") {
+        assetManager.loadJson(SKEL_FILE);
+    } else {
+        assetManager.loadBinary(SKEL_FILE);
+    }
+
+    requestAnimationFrame(load);
+}
+
+function load() {
+    if (assetManager.isLoadingComplete()) {
+        var atlas = assetManager.get(ATLAS_FILE);
+        var atlasLoader = new spine.AtlasAttachmentLoader(atlas);
+        var skeletonLoader = SKEL_TYPE === "json"
+            ? new spine.SkeletonJson(atlasLoader)
+            : new spine.SkeletonBinary(atlasLoader);
+        skeletonLoader.scale = 1.0;
+
+        var skeletonData = assetManager.get(SKEL_FILE);
+        skeleton = new spine.Skeleton(skeletonLoader.readSkeletonData(skeletonData));
+
+        state = new spine.AnimationState(
+            new spine.AnimationStateData(skeleton.data)
+        );
+
+        // 播放第一个动画
+        var anims = skeleton.data.animations;
+        if (anims && anims.length > 0) {
+            var animName = anims[0].name;
+            state.setAnimation(0, animName, true);
+            console.log("播放动画: " + animName);
+        }
+
+        // 居中缩放
+        skeleton.setToSetupPose();
+        bounds.update(skeleton, true);
+        centerSkeleton();
+
+        lastFrameTime = Date.now() / 1000;
+        requestAnimationFrame(render);
+    } else {
+        requestAnimationFrame(load);
+    }
+}
+
+function centerSkeleton() {
+    var canvasW = canvas.width;
+    var canvasH = canvas.height;
+
+    bounds.update(skeleton, true);
+    var w = bounds.maxX - bounds.minX;
+    var h = bounds.maxY - bounds.minY;
+    if (w <= 0) w = canvasW;
+    if (h <= 0) h = canvasH;
+
+    // 缩放使立绘填满高度的85%
+    var scale = (canvasH * 0.85) / h;
+    if (w * scale > canvasW) {
+        scale = (canvasW * 0.9) / w;
+    }
+    skeleton.scaleX = scale;
+    skeleton.scaleY = scale;
+
+    skeleton.updateWorldTransform();
+    bounds.update(skeleton, true);
+
+    // 居中
+    skeleton.x = canvasW / 2 - (bounds.maxX + bounds.minX) / 2;
+    skeleton.y = canvasH / 2 - (bounds.maxY + bounds.minY) / 2;
+    skeleton.updateWorldTransform();
+}
+
+function render() {
+    var now = Date.now() / 1000;
+    var delta = now - lastFrameTime;
+    lastFrameTime = now;
+
+    state.update(delta);
+    state.apply(skeleton);
+    skeleton.updateWorldTransform();
+
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    shader.setColored(false);
+    shader.setTexture(batcher.getTexture());
+    mvp.ortho2d(0, 0, canvas.width, canvas.height);
+    shader.setMvp(mvp.values);
+    shader.bind();
+    batcher.begin(shader);
+    batcher.draw(skeleton);
+    batcher.end();
+    shader.unbind();
+
+    requestAnimationFrame(render);
+}
+
+window.addEventListener("resize", function() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    if (skeleton) centerSkeleton();
+});
+
+window.addEventListener("load", init);
+</script>
+</body>
+</html>
