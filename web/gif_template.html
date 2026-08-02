@@ -42,10 +42,17 @@
 
     #canvas {
         display: block;
-        background: {{BG_COLOR}};
         position: absolute; inset: 0;
         width: 100%; height: 100%;
     }
+
+    #bg-layer {
+        position: absolute; inset: 0;
+        {{BG_CSS}}
+        z-index: 0;
+    }
+
+    {{EXTRA_CSS}}
 
     /* ========== 背景装饰几何 ========== */
     .bg-deco {
@@ -440,6 +447,7 @@
 </head>
 <body>
 
+<div id="bg-layer"></div>
 <div class="bg-deco"><div class="grid-lines"></div></div>
 <canvas id="canvas"></canvas>
 
@@ -487,9 +495,135 @@ var ATLAS_FILE = "{{ATLAS_FILE}}";
 var TEXTURE_FILE = "{{TEXTURE_FILE}}";
 var SKEL_TYPE = "{{SKEL_TYPE}}";
 var BG_COLOR = "{{BG_COLOR}}";
+var BG_MODE = {{BG_MODE}};
+var BG_PALETTE = {{BG_PALETTE}};
+var BG_IMAGE_FILE = "{{BG_IMAGE_FILE}}";
 var CAMERA_SCALE = {{CAMERA_SCALE}};
 var CAMERA_OFFSET_X = {{CAMERA_OFFSET_X}};
 var CAMERA_OFFSET_Y = {{CAMERA_OFFSET_Y}};
+
+var _bgImage = null;
+var _bgImageLoaded = false;
+
+function renderBackgroundToCanvas(ctx, w, h) {
+    ctx.clearRect(0, 0, w, h);
+    var palette = BG_PALETTE && BG_PALETTE.length > 0 ? BG_PALETTE : [BG_COLOR];
+    switch (BG_MODE) {
+        case 0: // 纯色
+            ctx.fillStyle = BG_COLOR;
+            ctx.fillRect(0, 0, w, h);
+            break;
+        case 1: // 莫奈 - 线性渐变
+        case 7: // 自动
+        case 8: // 噪点 (渐变底)
+        case 2: // 油画
+        case 3: // 极光
+        case 6: // 光斑散景
+            var grad = ctx.createLinearGradient(0, 0, w, h);
+            for (var i = 0; i < palette.length; i++) {
+                grad.addColorStop(i / Math.max(1, palette.length - 1), palette[i]);
+            }
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, w, h);
+            // 极光/散景需要额外叠加
+            if (BG_MODE === 3) {
+                // 极光: 多层径向光带
+                ctx.save();
+                ctx.globalCompositeOperation = 'lighter';
+                var centers = [[0.15, 0.20], [0.85, 0.25], [0.50, 0.55], [0.40, 0.95]];
+                var radii = [0.50, 0.50, 0.60, 0.60];
+                var alphas = [0.22, 0.22, 0.20, 0.20];
+                for (var ai = 0; ai < Math.min(4, palette.length); ai++) {
+                    var rg = ctx.createRadialGradient(
+                        centers[ai][0] * w, centers[ai][1] * h, 0,
+                        centers[ai][0] * w, centers[ai][1] * h, radii[ai] * Math.max(w, h)
+                    );
+                    rg.addColorStop(0, palette[ai] + toHexAlpha(alphas[ai]));
+                    rg.addColorStop(1, 'transparent');
+                    ctx.fillStyle = rg;
+                    ctx.fillRect(0, 0, w, h);
+                }
+                ctx.restore();
+            } else if (BG_MODE === 6) {
+                // 散景: 随机半透明圆形
+                ctx.save();
+                ctx.globalCompositeOperation = 'lighter';
+                var bokehCount = Math.max(15, Math.round(w * h / 3000));
+                for (var bi = 0; bi < bokehCount; bi++) {
+                    var bx = Math.random() * w;
+                    var by = Math.random() * h;
+                    var br = (0.05 + Math.random() * 0.20) * Math.min(w, h);
+                    var bc = palette[Math.floor(Math.random() * palette.length)];
+                    var balpha = 0.12 + Math.random() * 0.18;
+                    var bg2 = ctx.createRadialGradient(bx, by, 0, bx, by, br);
+                    bg2.addColorStop(0, bc + toHexAlpha(balpha));
+                    bg2.addColorStop(1, 'transparent');
+                    ctx.fillStyle = bg2;
+                    ctx.beginPath();
+                    ctx.arc(bx, by, br, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+            } else if (BG_MODE === 8) {
+                // 噪点: 在渐变上叠加噪点
+                ctx.save();
+                var grainCount = Math.max(200, Math.round(w * h / 150));
+                for (var gi = 0; gi < grainCount; gi++) {
+                    ctx.fillStyle = 'rgba(255,255,255,' + (0.02 + Math.random() * 0.05) + ')';
+                    var gx = Math.random() * w;
+                    var gy = Math.random() * h;
+                    ctx.fillRect(gx, gy, 1 + Math.random() * 2, 1 + Math.random() * 2);
+                }
+                ctx.restore();
+            }
+            break;
+        case 4: // 自定义图片
+            if (_bgImageLoaded && _bgImage) {
+                var iw = _bgImage.width, ih = _bgImage.height;
+                var scale = Math.max(w / iw, h / ih);
+                var dw = iw * scale, dh = ih * scale;
+                var dx = (w - dw) / 2, dy = (h - dh) / 2;
+                ctx.drawImage(_bgImage, dx, dy, dw, dh);
+            } else {
+                ctx.fillStyle = BG_COLOR;
+                ctx.fillRect(0, 0, w, h);
+            }
+            break;
+        case 5: // 毛玻璃: 半透明渐变
+            var grad2 = ctx.createLinearGradient(0, 0, w, h);
+            for (var gi2 = 0; gi2 < palette.length; gi2++) {
+                grad2.addColorStop(gi2 / Math.max(1, palette.length - 1), palette[gi2]);
+            }
+            ctx.fillStyle = grad2;
+            ctx.fillRect(0, 0, w, h);
+            // 毛玻璃叠加层
+            ctx.save();
+            ctx.globalAlpha = 0.35;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+            ctx.restore();
+            break;
+        default:
+            ctx.fillStyle = BG_COLOR;
+            ctx.fillRect(0, 0, w, h);
+    }
+}
+
+function toHexAlpha(a) {
+    var v = Math.round(Math.max(0, Math.min(1, a)) * 255);
+    return v.toString(16).padStart(2, '0');
+}
+
+function loadBgImage() {
+    return new Promise(function(resolve) {
+        if (!BG_IMAGE_FILE) { resolve(); return; }
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = function() { _bgImage = img; _bgImageLoaded = true; resolve(); };
+        img.onerror = function() { resolve(); };
+        img.src = BG_IMAGE_FILE;
+    });
+}
 
 var statusEl = document.getElementById("status");
 var recordBtn = document.getElementById("record-btn");
@@ -578,6 +712,10 @@ function load() {
             var rawData = assetManager.get(SKEL_FILE);
             var skeletonData = skeletonLoader.readSkeletonData(rawData);
             skeleton = new spine.Skeleton(skeletonData);
+            // 显式设置 default skin, 确保附件全部绑定到 slot
+            var defaultSkin = skeletonData.findSkin("default");
+            if (defaultSkin) skeleton.setSkin(defaultSkin);
+            skeleton.setSlotsToSetupPose();
             state = new spine.AnimationState(
                 new spine.AnimationStateData(skeleton.data)
             );
@@ -601,10 +739,11 @@ function load() {
     }
 }
 
-function calculateBounds() {
+function calculateBounds(skel) {
+    var s = skel || skeleton;
     var minX = Infinity, maxX = -Infinity;
     var minY = Infinity, maxY = -Infinity;
-    var slots = skeleton.slots;
+    var slots = s.slots;
     var hasVertices = false;
     for (var i = 0; i < slots.length; i++) {
         var slot = slots[i];
@@ -625,6 +764,40 @@ function calculateBounds() {
         }
     }
     if (!hasVertices) {
+        // 用 skin 兜底: 遍历 setup pose 下所有 attachment
+        var skin = s.skin || (s.data && s.data.defaultSkin);
+        if (skin) {
+            for (var si = 0; si < slots.length; si++) {
+                var sSlot = slots[si];
+                var sAtt = null;
+                try { sAtt = skin.getAttachment(sSlot.data.index, sSlot.data.attachmentName); } catch(e){}
+                if (!sAtt) continue;
+                var vl = sAtt.worldVerticesLength;
+                if (!vl || vl < 2) continue;
+                if (sAtt instanceof spine.RegionAttachment) {
+                    if (typeof sAtt.updateOffset === 'function') { try { sAtt.updateOffset(); } catch(e){} }
+                    var vs = new Array(8);
+                    try { sAtt.computeWorldVertices(sSlot, vs, 0, 2); } catch(e){ continue; }
+                    for (var jj = 0; jj < 8; jj += 2) {
+                        var xx = vs[jj], yy = vs[jj+1];
+                        if (xx < minX) minX = xx; if (xx > maxX) maxX = xx;
+                        if (yy < minY) minY = yy; if (yy > maxY) maxY = yy;
+                    }
+                    hasVertices = true;
+                } else if (sAtt instanceof spine.MeshAttachment) {
+                    var vs2 = spine.Utils.newFloatArray(vl);
+                    try { sAtt.computeWorldVertices(sSlot, 0, vl, vs2, 0, 2); } catch(e){continue;}
+                    for (var jjm = 0; jjm < vl; jjm += 2) {
+                        var xm = vs2[jjm], ym = vs2[jjm+1];
+                        if (xm < minX) minX = xm; if (xm > maxX) maxX = xm;
+                        if (ym < minY) minY = ym; if (ym > maxY) maxY = ym;
+                    }
+                    hasVertices = true;
+                }
+            }
+        }
+    }
+    if (!hasVertices) {
         for (var i = 0; i < slots.length; i++) {
             var bone = slots[i].bone;
             var x = bone.worldX, y = bone.worldY;
@@ -636,18 +809,22 @@ function calculateBounds() {
     return { minX: minX, maxX: maxX, minY: minY, maxY: maxY };
 }
 
-function setupCamera() {
-    var b = calculateBounds();
+function setupCameraFor(skel, targetCanvas, targetRenderer) {
+    var b = calculateBounds(skel);
     var w = b.maxX - b.minX, h = b.maxY - b.minY;
     var cx = (b.maxX + b.minX) / 2, cy = (b.maxY + b.minY) / 2;
-    var camera = sceneRenderer.camera;
+    var camera = targetRenderer.camera;
     camera.position.x = cx; camera.position.y = cy; camera.position.z = 0;
-    var zoomH = h / (canvas.height * 0.85);
-    var zoomW = w / (canvas.width * 0.9);
+    var zoomH = h / (targetCanvas.height * 0.85);
+    var zoomW = w / (targetCanvas.width * 0.9);
     var zoom = Math.max(zoomH, zoomW) * CAMERA_SCALE;
     camera.zoom = zoom;
     camera.position.x += CAMERA_OFFSET_X * zoom;
     camera.position.y += CAMERA_OFFSET_Y * zoom;
+}
+
+function setupCamera() {
+    setupCameraFor(skeleton, canvas, sceneRenderer);
 }
 
 function render() {
@@ -735,9 +912,6 @@ recordBtn.addEventListener("click", async function() {
         targetCanvas.width = width; targetCanvas.height = height;
         var targetGl = targetCanvas.getContext('webgl', { alpha: true });
         var targetSceneRenderer = new spine.webgl.SceneRenderer(targetCanvas, targetGl, false);
-        targetSceneRenderer.camera.position.x = sceneRenderer.camera.position.x;
-        targetSceneRenderer.camera.position.y = sceneRenderer.camera.position.y;
-        targetSceneRenderer.camera.zoom = sceneRenderer.camera.zoom;
         var targetAssetManager = new spine.webgl.AssetManager(targetGl);
         var img = new Image();
         img.crossOrigin = 'anonymous';
@@ -763,6 +937,10 @@ recordBtn.addEventListener("click", async function() {
                         var rawData = targetAssetManager.get(SKEL_FILE);
                         var skeletonData = skeletonLoader.readSkeletonData(rawData);
                         var targetSkeleton = new spine.Skeleton(skeletonData);
+                        // 显式设置 default skin, 确保附件绑定
+                        var tDefaultSkin = skeletonData.findSkin("default");
+                        if (tDefaultSkin) targetSkeleton.setSkin(tDefaultSkin);
+                        targetSkeleton.setSlotsToSetupPose();
                         var targetState = new spine.AnimationState(
                             new spine.AnimationStateData(targetSkeleton.data)
                         );
@@ -772,6 +950,8 @@ recordBtn.addEventListener("click", async function() {
                         }
                         targetSkeleton.setToSetupPose();
                         targetSkeleton.updateWorldTransform();
+                        // 按目标canvas尺寸独立计算camera, 确保完整绘制立绘
+                        setupCameraFor(targetSkeleton, targetCanvas, targetSceneRenderer);
                         window._targetSkeleton = targetSkeleton;
                         window._targetState = targetState;
                         resolve();
@@ -780,6 +960,8 @@ recordBtn.addEventListener("click", async function() {
                 waitLoad();
             };
         });
+        // 等待背景图片加载完成(自定义图片模式)
+        await loadBgImage();
         var targetSkeleton = window._targetSkeleton;
         var targetState = window._targetState;
 
@@ -792,8 +974,8 @@ recordBtn.addEventListener("click", async function() {
             targetSceneRenderer.begin();
             targetSceneRenderer.drawSkeleton(targetSkeleton, true);
             targetSceneRenderer.end();
-            offscreenCtx.fillStyle = BG_COLOR || '#000000';
-            offscreenCtx.fillRect(0, 0, width, height);
+            // 先绘制背景, 再绘制立绘
+            renderBackgroundToCanvas(offscreenCtx, width, height);
             offscreenCtx.drawImage(targetCanvas, 0, 0, width, height);
             var frameDataUrl = offscreenCanvas.toDataURL('image/png');
             await sendFrameToServer(frameDataUrl, frame, totalFrames);

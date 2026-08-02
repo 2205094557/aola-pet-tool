@@ -36,10 +36,50 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
     QTabWidget, QTextEdit, QProgressBar, QStatusBar, QMessageBox,
     QGroupBox, QFormLayout, QSpinBox, QDoubleSpinBox, QColorDialog,
-    QSplitter, QFrame, QComboBox, QFileDialog
+    QSplitter, QFrame, QComboBox, QFileDialog, QAbstractSpinBox,
+    QCheckBox
 )
 
-from aola_api import AolaAPI
+from aola_api import AolaAPI, PET_ICON_PATH
+
+
+def _make_number_row(spin):
+    """把 SpinBox 包成「胶囊容器 + 左右圆形按钮 + 居中数值」的现代数值调节器.
+
+    返回一个 QWidget,可以直接塞进 QFormLayout 的右侧单元格.
+    """
+    container = QFrame()
+    container.setObjectName("numRowContainer")
+    h = QHBoxLayout(container)
+    h.setContentsMargins(4, 2, 4, 2)
+    h.setSpacing(4)
+
+    def _btn(text, obj):
+        b = QPushButton(text)
+        b.setObjectName(obj)
+        b.setFixedSize(26, 26)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setFocusPolicy(Qt.NoFocus)
+        return b
+
+    minus = _btn("−", "numMinusBtn")
+    plus = _btn("+", "numPlusBtn")
+
+    spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+    spin.setFrame(False)
+    spin.setAlignment(Qt.AlignCenter)
+    spin.setObjectName("numSpin")
+    spin.setMinimumHeight(26)
+    spin.setStyleSheet(spin.styleSheet())  # 继承全局 QSS,同时确保 objectName 生效
+
+    # 按钮行为
+    minus.clicked.connect(spin.stepDown)
+    plus.clicked.connect(spin.stepUp)
+
+    h.addWidget(minus)
+    h.addWidget(spin, 1)
+    h.addWidget(plus)
+    return container
 
 
 def _get_base_dir():
@@ -68,11 +108,17 @@ class SearchThread(QThread):
         try:
             if self.keyword.isdigit():
                 # 数字: 按ID查询
-                name = self.api.get_pet_name(self.keyword)
+                pid = self.keyword
+                name = self.api.get_pet_name(pid)
                 if name:
-                    self.result_signal.emit([(self.keyword, name)])
+                    self.result_signal.emit([(pid, name)])
                 else:
-                    self.error_signal.emit(f"未找到ID为 {self.keyword} 的宠物")
+                    # 字典中找不到 (新宠物字典滞后于资源上线), 检测资源是否存在
+                    resources = self.api.get_pet_resources(pid)
+                    if resources:
+                        self.result_signal.emit([(pid, f"#{pid}")])
+                    else:
+                        self.error_signal.emit(f"未找到ID为 {pid} 的宠物")
             else:
                 # 文字: 按名称搜索
                 results = self.api.search_pets_by_name(self.keyword)
@@ -82,6 +128,95 @@ class SearchThread(QThread):
                     self.error_signal.emit(f"未找到名称含「{self.keyword}」的宠物")
         except Exception as e:
             self.error_signal.emit(str(e))
+
+
+def parse_id_range(text):
+    """解析批量ID输入, 返回ID列表
+
+    支持格式:
+    - 单ID: "5943"
+    - 区间: "5000-6000"
+    - 逗号: "5000,5001,5002"
+    - 混合: "5000-5010,6000,6001-6005"
+    """
+    ids = set()
+    parts = text.replace(" ", "").split(",")
+    for part in parts:
+        if "-" in part:
+            tokens = part.split("-")
+            if len(tokens) == 2 and tokens[0].isdigit() and tokens[1].isdigit():
+                start, end = int(tokens[0]), int(tokens[1])
+                if start <= end:
+                    for i in range(start, end + 1):
+                        ids.add(str(i))
+                else:
+                    for i in range(end, start + 1):
+                        ids.add(str(i))
+        elif part.isdigit():
+            ids.add(part)
+    return sorted(ids, key=lambda x: int(x))
+
+
+class BatchSearchThread(QThread):
+    """批量ID搜索线程: 字典查找 + 可选资源检测"""
+    progress_signal = pyqtSignal(int, str)
+    result_signal = pyqtSignal(list)
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, api, id_list, check_resources=False):
+        super().__init__()
+        self.api = api
+        self.id_list = id_list
+        self.check_resources = check_resources
+
+    def run(self):
+        try:
+            total = len(self.id_list)
+            if total == 0:
+                self.error_signal.emit("没有有效的ID")
+                return
+
+            self.progress_signal.emit(5, "加载宠物字典...")
+            d = self.api._load_dict()
+
+            self.progress_signal.emit(20, f"筛选 {total} 个ID...")
+            # 第一步: 字典查名字, 找不到的用 #ID 兜底
+            # (宠物字典数据可能滞后于实际资源上线, 如6021等新宠物)
+            named = []      # 字典里有的 (name 已知)
+            unnamed = []    # 字典里没有的 (用 #ID, 需检测资源确认)
+            for pid in self.id_list:
+                info = d.get(str(pid))
+                if info and len(info) > 1:
+                    named.append((str(pid), info[1]))
+                else:
+                    unnamed.append((str(pid), f"#{pid}"))
+
+            # 第二步: 检测资源
+            if self.check_resources:
+                # 勾选检测资源: named + unnamed 全部检测, 有资源即有效
+                candidates = named + unnamed
+                self.progress_signal.emit(40, f"检测 {len(candidates)} 个ID的资源...")
+                valid = []
+                for i, (pid, name) in enumerate(candidates):
+                    if i % 10 == 0:
+                        pct = 40 + int((i / len(candidates)) * 55)
+                        self.progress_signal.emit(pct, f"检测资源 {i+1}/{len(candidates)}...")
+                    resources = self.api.get_pet_resources(pid)
+                    if resources:
+                        valid.append((pid, name))
+                self.progress_signal.emit(100, f"检测完成: {len(valid)}/{len(candidates)} 个有资源")
+                self.result_signal.emit(valid)
+            else:
+                # 不检测资源: 只返回字典里有的 (字典缺失的ID无法确认有效性)
+                if not named:
+                    self.error_signal.emit(f"字典中未找到 {total} 个ID中的任何一个 (可勾选「检测资源」尝试)")
+                    return
+                self.progress_signal.emit(100, f"找到 {len(named)} 个宠物")
+                self.result_signal.emit(named)
+
+        except Exception as e:
+            import traceback
+            self.error_signal.emit(f"{e}\n{traceback.format_exc()}")
 
 
 class DetectThread(QThread):
@@ -151,6 +286,8 @@ class WallpaperThread(QThread):
     """生成壁纸项目线程"""
     progress_signal = pyqtSignal(int, str)
     finished_signal = pyqtSignal(bool, str, str)
+    # 噪点纹理 data URI, 首次使用时生成并缓存
+    _GRAIN_DATA_URI = None
 
     def __init__(self, api, pet_id, pet_name, output_dir, settings):
         super().__init__()
@@ -323,6 +460,38 @@ class WallpaperThread(QThread):
             return f"background: linear-gradient({angle}deg, {stops});"
 
     @staticmethod
+    def _get_or_build_palette(bg_color, mode, png_path=None):
+        """提取 PNG 主色调, 缺失时从 bg_color 按 mode 生成回退调色板"""
+        palette = WallpaperThread._extract_palette(png_path) if png_path else None
+        if palette:
+            return palette
+        from PyQt5.QtGui import QColor
+        c = QColor(bg_color)
+        h = c.hue() / 360.0
+        s = c.saturation() / 255.0
+        v = c.value() / 255.0
+        if s < 0.1:
+            s = 0.4
+        if v < 0.15:
+            v = 0.5
+        if h < 0:
+            h = 0.5
+        if mode == 2:  # 油画专用调色板
+            return [
+                WallpaperThread._hsv_to_hex(h, s, min(0.9, v * 0.85)),
+                WallpaperThread._hsv_to_hex((h + 0.03) % 1, min(1, s * 1.15), min(0.95, v * 1.05)),
+                WallpaperThread._hsv_to_hex((h + 0.12) % 1, max(0.3, s * 0.7), min(1.0, v * 1.15)),
+                WallpaperThread._hsv_to_hex((h + 0.28) % 1, max(0.25, s * 0.5), min(0.8, v * 0.75)),
+            ]
+        # 莫奈 / 自动 / 极光 / 散景 / 噪点 通用调色板
+        return [
+            WallpaperThread._hsv_to_hex(h, max(0.1, s * 0.6), min(0.95, v * 1.1)),
+            WallpaperThread._hsv_to_hex((h + 0.08) % 1, max(0.2, s * 0.8), min(1.0, v * 1.2)),
+            WallpaperThread._hsv_to_hex((h + 0.15) % 1, max(0.15, s * 0.9), min(0.9, v * 0.95)),
+            WallpaperThread._hsv_to_hex((h + 0.45) % 1, max(0.1, s * 0.4), min(0.85, v * 0.85)),
+        ]
+
+    @staticmethod
     def _compute_bg_css(bg_color, mode, png_path=None, bg_image=None):
         if mode == 0:
             return f"background: {bg_color};"
@@ -332,6 +501,35 @@ class WallpaperThread(QThread):
                 img_name = os.path.basename(bg_image)
                 return (f"background: url('{img_name}') center/cover no-repeat;")
             return f"background: {bg_color};"
+        if mode == 5:
+            # 毛玻璃: body 本身透明, 渐变层+玻璃层由 EXTRA_CSS 注入
+            return "background: transparent;"
+        palette = WallpaperThread._get_or_build_palette(bg_color, mode, png_path)
+        if mode == 1:
+            return WallpaperThread._make_gradient(palette, "monet")
+        if mode == 2:
+            return WallpaperThread._make_gradient(palette, "oil")
+        if mode == 3:
+            return WallpaperThread._make_gradient(palette, "auto")
+        if mode == 6:
+            return WallpaperThread._make_aurora(palette, bg_color)
+        if mode == 7:
+            return WallpaperThread._make_bokeh(palette, bg_color)
+        if mode == 8:
+            # 噪点颗粒: body 只放渐变底, 颗粒覆盖层由 EXTRA_CSS 注入
+            return WallpaperThread._make_gradient(palette, "monet")
+        # 未知 mode 兜底
+        return WallpaperThread._make_gradient(palette, "monet")
+
+    @staticmethod
+    def _compute_glass_css(bg_color, png_path=None):
+        """生成毛玻璃专属 CSS (注入到模板的 {{GLASS_CSS}} 占位符)
+
+        实现思路:
+        - body::before: 高斯模糊的彩色渐变层 (z-index -2), 营造毛玻璃底色
+        - body::after : 半透明覆盖 + backdrop-filter: blur (z-index -1), 形成"玻璃"质感
+        - canvas      : WebGL 透明渲染, 在最上层显示清晰立绘
+        """
         palette = WallpaperThread._extract_palette(png_path) if png_path else None
         if not palette:
             from PyQt5.QtGui import QColor
@@ -345,38 +543,133 @@ class WallpaperThread(QThread):
                 v = 0.5
             if h < 0:
                 h = 0.5
-            if mode == 1:  # 莫奈
-                palette = [
-                    WallpaperThread._hsv_to_hex(h, max(0.1, s * 0.6), min(0.95, v * 1.1)),
-                    WallpaperThread._hsv_to_hex((h + 0.08) % 1, max(0.2, s * 0.8), min(1.0, v * 1.2)),
-                    WallpaperThread._hsv_to_hex((h + 0.15) % 1, max(0.15, s * 0.9), min(0.9, v * 0.95)),
-                    WallpaperThread._hsv_to_hex((h + 0.45) % 1, max(0.1, s * 0.4), min(0.85, v * 0.85)),
-                ]
-                return WallpaperThread._make_gradient(palette, "monet")
-            elif mode == 2:  # 油画
-                palette = [
-                    WallpaperThread._hsv_to_hex(h, s, min(0.9, v * 0.85)),
-                    WallpaperThread._hsv_to_hex((h + 0.03) % 1, min(1, s * 1.15), min(0.95, v * 1.05)),
-                    WallpaperThread._hsv_to_hex((h + 0.12) % 1, max(0.3, s * 0.7), min(1.0, v * 1.15)),
-                    WallpaperThread._hsv_to_hex((h + 0.28) % 1, max(0.25, s * 0.5), min(0.8, v * 0.75)),
-                ]
-                return WallpaperThread._make_gradient(palette, "oil")
-            else:  # 自动
-                palette = [
-                    WallpaperThread._hsv_to_hex(h, max(0.1, s * 0.6), min(0.95, v * 1.1)),
-                    WallpaperThread._hsv_to_hex((h + 0.08) % 1, max(0.2, s * 0.8), min(1.0, v * 1.2)),
-                    WallpaperThread._hsv_to_hex((h + 0.15) % 1, max(0.15, s * 0.9), min(0.9, v * 0.95)),
-                    WallpaperThread._hsv_to_hex((h + 0.45) % 1, max(0.1, s * 0.4), min(0.85, v * 0.85)),
-                ]
-                return WallpaperThread._make_gradient(palette, "auto")
-        else:
-            style = "oil" if mode == 2 else ("monet" if mode == 1 else "auto")
-            return WallpaperThread._make_gradient(palette, style)
+            palette = [
+                WallpaperThread._hsv_to_hex(h, max(0.1, s * 0.6), min(0.95, v * 1.1)),
+                WallpaperThread._hsv_to_hex((h + 0.08) % 1, max(0.2, s * 0.8), min(1.0, v * 1.2)),
+                WallpaperThread._hsv_to_hex((h + 0.15) % 1, max(0.15, s * 0.9), min(0.9, v * 0.95)),
+                WallpaperThread._hsv_to_hex((h + 0.45) % 1, max(0.1, s * 0.4), min(0.85, v * 0.85)),
+            ]
+        stops = ", ".join(
+            f"{c} {100 * i / (len(palette) - 1):.0f}%"
+            for i, c in enumerate(palette)
+        )
+        return (
+            "body::before { content: ''; position: fixed; inset: -80px; "
+            f"background: linear-gradient(135deg, {stops}); "
+            "filter: blur(80px) saturate(1.4); "
+            "z-index: -2; pointer-events: none; } "
+            "body::after { content: ''; position: fixed; inset: 0; "
+            "background: rgba(255, 255, 255, 0.06); "
+            "backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); "
+            "z-index: -1; pointer-events: none; }"
+        )
+
+    @staticmethod
+    def _make_aurora(palette, bg_color):
+        """极光渐变: 深色宇宙底 + 多层柔和流动的彩色极光光带"""
+        from PyQt5.QtGui import QColor
+        c = QColor(bg_color)
+        h = c.hue() / 360.0
+        s = c.saturation() / 255.0
+        v = c.value() / 255.0
+        if s < 0.1: s = 0.4
+        if v < 0.15: v = 0.25
+        if h < 0: h = 0.5
+        # 深色宇宙底
+        dark1 = WallpaperThread._hsv_to_hex(h, max(0.2, s * 0.45), min(0.20, v * 0.35))
+        dark2 = WallpaperThread._hsv_to_hex((h + 0.07) % 1, max(0.15, s * 0.35), min(0.10, v * 0.25))
+        # 取前3色做主光带
+        c1 = palette[0] if len(palette) > 0 else "#5fd4e8"
+        c2 = palette[1] if len(palette) > 1 else "#b36cd8"
+        c3 = palette[2] if len(palette) > 2 else "#6366f1"
+        c4 = palette[3] if len(palette) > 3 else "#ec4899"
+        return (
+            "background: "
+            # 光带1 - 左上斜向下
+            f"radial-gradient(ellipse 90% 45% at 15% 20%, {c1}55 0%, transparent 55%), "
+            # 光带2 - 右上斜向下
+            f"radial-gradient(ellipse 85% 50% at 85% 25%, {c2}55 0%, transparent 55%), "
+            # 光带3 - 中间横贯
+            f"radial-gradient(ellipse 120% 40% at 50% 55%, {c3}4d 0%, transparent 60%), "
+            # 光带4 - 下方
+            f"radial-gradient(ellipse 100% 55% at 40% 95%, {c4}4d 0%, transparent 60%), "
+            # 底层宇宙色
+            f"linear-gradient(170deg, {dark2} 0%, {dark1} 40%, {dark2} 100%);"
+        )
+
+    @staticmethod
+    def _make_bokeh(palette, bg_color):
+        """光斑散景: 渐变底 + 多个半透明圆形光晕叠加"""
+        from PyQt5.QtGui import QColor
+        c = QColor(bg_color)
+        h = c.hue() / 360.0
+        s = c.saturation() / 255.0
+        v = c.value() / 255.0
+        if s < 0.1: s = 0.4
+        if v < 0.15: v = 0.5
+        if h < 0: h = 0.5
+        c1 = palette[0] if len(palette) > 0 else WallpaperThread._hsv_to_hex(h, max(0.1, s * 0.6), min(0.95, v * 1.1))
+        c2 = palette[1] if len(palette) > 1 else WallpaperThread._hsv_to_hex((h + 0.08) % 1, max(0.2, s * 0.8), min(1.0, v * 1.2))
+        c3 = palette[2] if len(palette) > 2 else WallpaperThread._hsv_to_hex((h + 0.15) % 1, max(0.15, s * 0.9), min(0.9, v * 0.95))
+        c4 = palette[3] if len(palette) > 3 else WallpaperThread._hsv_to_hex((h + 0.45) % 1, max(0.1, s * 0.4), min(0.85, v * 0.85))
+        return (
+            "background: "
+            # 7 个不同大小/颜色的散景光斑
+            f"radial-gradient(circle at 15% 20%, {c2}66 0px, transparent 130px), "
+            f"radial-gradient(circle at 85% 15%, {c1}5d 0px, transparent 100px), "
+            f"radial-gradient(circle at 75% 75%, {c3}55 0px, transparent 180px), "
+            f"radial-gradient(circle at 25% 80%, {c2}4d 0px, transparent 150px), "
+            f"radial-gradient(circle at 50% 40%, {c4}44 0px, transparent 120px), "
+            f"radial-gradient(circle at 92% 88%, {c1}55 0px, transparent 90px), "
+            f"radial-gradient(circle at 8% 55%, {c3}44 0px, transparent 110px), "
+            # 底层渐变
+            f"linear-gradient(135deg, {c4} 0%, {c1} 50%, {c2} 100%);"
+        )
+
+    @staticmethod
+    def _build_grain_data_uri():
+        """生成 16x16 灰度噪点 PNG 并编码为 data URI, 缓存到类属性"""
+        if WallpaperThread._GRAIN_DATA_URI is not None:
+            return WallpaperThread._GRAIN_DATA_URI
+        try:
+            import random, io, base64
+            from PIL import Image
+            W = H = 16
+            img = Image.new("L", (W, H))
+            px = img.load()
+            rnd = random.Random(1984)
+            for y in range(H):
+                for x in range(W):
+                    v = rnd.randint(90, 200)
+                    px[x, y] = v
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            WallpaperThread._GRAIN_DATA_URI = (
+                "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+            )
+        except Exception:
+            WallpaperThread._GRAIN_DATA_URI = ""
+        return WallpaperThread._GRAIN_DATA_URI
+
+    @staticmethod
+    def _compute_grain_extra_css():
+        """生成噪点覆盖层 CSS (通过 body::after 伪元素叠加, 用 mix-blend-mode + 低透明度)"""
+        uri = WallpaperThread._build_grain_data_uri()
+        if not uri:
+            return ""
+        return (
+            "body::after { content: ''; position: fixed; inset: 0; "
+            f"background-image: url(\"{uri}\"); "
+            "background-repeat: repeat; "
+            "opacity: 0.18; "
+            "mix-blend-mode: overlay; "
+            "z-index: 0; pointer-events: none; }"
+        )
 
     def run(self):
         try:
             pet_id = self.pet_id
-            resource_type = self.settings.get("resource_type", "spine_fight")
+            resource_type = self.settings.get("resource_type", "spine_breath")
 
             self.progress_signal.emit(10, "下载Spine资源...")
             success, files = self.api.download_spine_resources(
@@ -409,21 +702,33 @@ class WallpaperThread(QThread):
             bg_mode = self.settings.get("bg_mode", 0)
             bg_color = self.settings.get("bg_color", "#000000")
             bg_image = self.settings.get("bg_image", "")
+            extra_css = ""
+            real_png = png_file if png_file and os.path.exists(png_file) else None
             if bg_mode == 4:
                 # 自定义图片模式: 复制背景图到输出目录
                 if bg_image and os.path.isfile(bg_image):
                     dst_img = os.path.join(self.output_dir, os.path.basename(bg_image))
                     shutil.copy(bg_image, dst_img)
                 bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, None, bg_image)
-            elif bg_mode > 0 and png_file and os.path.exists(png_file):
-                bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, png_file)
+            elif bg_mode == 5:
+                # 毛玻璃模式: body 透明, 模糊渐变层由 EXTRA_CSS 注入
+                bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+                extra_css = WallpaperThread._compute_glass_css(bg_color, real_png)
+            elif bg_mode == 8:
+                # 噪点颗粒: 渐变底 + 噪点覆盖层
+                bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+                extra_css = WallpaperThread._compute_grain_extra_css()
             else:
-                bg_css = self.settings.get("bg_css", f"background: {bg_color};")
+                if real_png:
+                    bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+                else:
+                    bg_css = self.settings.get("bg_css", f"background: {bg_color};")
             html = tpl.replace("{{SKEL_FILE}}", os.path.basename(skel_file)) \
                       .replace("{{ATLAS_FILE}}", os.path.basename(atlas_file)) \
                       .replace("{{TEXTURE_FILE}}", os.path.basename(png_file)) \
                       .replace("{{SKEL_TYPE}}", skel_type) \
                       .replace("{{BG_CSS}}", bg_css) \
+                      .replace("{{EXTRA_CSS}}", extra_css) \
                       .replace("{{BG_COLOR}}", bg_color) \
                       .replace("{{CAMERA_SCALE}}", str(self.settings.get("scale", 1.0))) \
                       .replace("{{CAMERA_OFFSET_X}}", str(self.settings.get("offset_x", 0))) \
@@ -435,7 +740,10 @@ class WallpaperThread(QThread):
                 f.write(html)
 
             self.progress_signal.emit(80, "生成 project.json...")
-            # 生成 Wallpaper Engine 项目配置(必须严格符合官方 schema,否则会崩溃)
+            # 生成 Wallpaper Engine 项目配置
+            # slider 类型只支持整数, 缩放用 10~300 表示 0.1~3.0 (JS 端除以 100)
+            # 只暴露 缩放/水平偏移/垂直偏移 三个控件, 背景色由软件生成后由 WE 直接显示,不允许用户覆盖
+            scale_int = int(round(float(self.settings.get("scale", 1.0)) * 100))
             project_json = {
                 "file": "index.html",
                 "general": {
@@ -443,9 +751,9 @@ class WallpaperThread(QThread):
                         "scalectrl": {
                             "text": "缩放",
                             "type": "slider",
-                            "value": float(self.settings.get("scale", 1.0)),
-                            "min": 0.1,
-                            "max": 3.0,
+                            "value": scale_int,
+                            "min": 10,
+                            "max": 300,
                             "editable": True
                         },
                         "offsetx": {
@@ -654,9 +962,22 @@ class MainWindow(QMainWindow):
         sb_layout = QHBoxLayout(search_box)
         sb_layout.addWidget(QLabel("ID或名称:"))
         self.input_search = QLineEdit()
-        self.input_search.setPlaceholderText("输入宠物ID(如5943)或名称(如羲和)")
+        self.input_search.setPlaceholderText("单ID: 5943  区间: 5000-6000  多ID: 5000,5001,5002")
         self.input_search.returnPressed.connect(self.on_search)
         sb_layout.addWidget(self.input_search, 1)
+
+        # 批量模式复选框
+        self.chk_batch = QCheckBox("批量模式")
+        self.chk_batch.setToolTip("输入ID区间或多个ID, 搜索字典中所有匹配的宠物")
+        self.chk_batch.stateChanged.connect(self._on_batch_mode_changed)
+        sb_layout.addWidget(self.chk_batch)
+
+        # 批量检测资源复选框 (仅批量模式可用)
+        self.chk_check_res = QCheckBox("检测资源")
+        self.chk_check_res.setToolTip("只显示有立绘资源的宠物 (较慢, 需联网)")
+        self.chk_check_res.setEnabled(False)
+        sb_layout.addWidget(self.chk_check_res)
+
         self.btn_search = QPushButton("搜索")
         self.btn_search.setObjectName("btnSearch")
         self.btn_search.clicked.connect(self.on_search)
@@ -666,37 +987,80 @@ class MainWindow(QMainWindow):
         # ===== 中间: 主工作区 =====
         splitter = QSplitter(Qt.Horizontal)
 
+        # 统一的三栏标题样式：相同高度/字重，保证顶部 baseline 对齐
+        def _section_label(text):
+            lb = QLabel(text)
+            lb.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            lb.setFixedHeight(22)
+            lb.setStyleSheet(
+                "font-weight: 600; color: #94e3eb; font-size: 13px;"
+                "letter-spacing: 0.5px;"
+            )
+            return lb
+
+        # 统一的"头部框"外观（同 padding / 圆角 / min-height），
+        # 让 宠物信息框 与 预览框 视觉顶边/高度对齐
+        _HEAD_MIN_H = 56
+        _HEAD_STYLE = (
+            "padding: 10px 14px;"
+            "background: #252940;"
+            "border: 1px solid #3a5a7a;"
+            "border-radius: 8px;"
+        )
+
+        # 统一的"内容面板"容器：list + 按钮等内容包进一个卡片，
+        # 与 宠物信息/预览/壁纸参数 的外围容器视觉完全统一
+        def _panel_widget():
+            frame = QFrame()
+            frame.setStyleSheet(
+                "QFrame {"
+                "  background: #252940;"
+                "  border: 1px solid #3a5a7a;"
+                "  border-radius: 8px;"
+                "}"
+                # 让 list / button 放在 panel 里无边框无底色，避免双重描边
+                "QFrame QListWidget { border: none; background: transparent; }"
+                "QFrame QPushButton { margin-top: 6px; }"
+            )
+            lay = QVBoxLayout(frame)
+            lay.setContentsMargins(8, 8, 8, 8)
+            lay.setSpacing(8)
+            return frame, lay
+
         # 左侧: 搜索结果列表
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
-        ll.addWidget(QLabel("搜索结果:"))
+        ll.setSpacing(8)
+        ll.addWidget(_section_label("搜索结果"))
+        results_panel, rp_lay = _panel_widget()
         self.list_results = QListWidget()
         self.list_results.itemDoubleClicked.connect(self.on_result_double_click)
-        ll.addWidget(self.list_results, 1)
+        rp_lay.addWidget(self.list_results, 1)
         self.btn_detect = QPushButton("检测资源")
         self.btn_detect.clicked.connect(self.on_detect_resources)
-        ll.addWidget(self.btn_detect)
+        rp_lay.addWidget(self.btn_detect)
+        ll.addWidget(results_panel, 1)
         splitter.addWidget(left)
 
         # 中间: 资源列表 + 信息
         mid = QWidget()
         ml = QVBoxLayout(mid)
         ml.setContentsMargins(0, 0, 0, 0)
-        self.label_pet_info = QLabel("宠物信息: (未选择)")
+        ml.setSpacing(8)
+        ml.addWidget(_section_label("宠物信息"))
+        self.label_pet_info = QLabel("(未选择)")
         self.label_pet_info.setWordWrap(True)
-        self.label_pet_info.setStyleSheet(
-            "padding:10px 14px;"
-            "background: #252940;"
-            "border: 1px solid #3a5a7a;"
-            "border-radius: 8px;"
-            "color: #ffffff;")
+        self.label_pet_info.setMinimumHeight(_HEAD_MIN_H)
+        self.label_pet_info.setStyleSheet(_HEAD_STYLE + "color: #ffffff;")
         ml.addWidget(self.label_pet_info)
-        ml.addWidget(QLabel("可用资源:"))
+        ml.addWidget(_section_label("可用资源"))
+        resources_panel, rsp_lay = _panel_widget()
         self.list_resources = QListWidget()
-        ml.addWidget(self.list_resources, 1)
+        rsp_lay.addWidget(self.list_resources, 1)
 
         res_btns = QHBoxLayout()
+        res_btns.setContentsMargins(0, 0, 0, 0)
         self.btn_sel_all = QPushButton("全选")
         self.btn_sel_all.clicked.connect(self.on_select_all)
         res_btns.addWidget(self.btn_sel_all)
@@ -710,21 +1074,20 @@ class MainWindow(QMainWindow):
         self.btn_download_all = QPushButton("一键全下")
         self.btn_download_all.clicked.connect(self.on_download_all)
         res_btns.addWidget(self.btn_download_all)
-        ml.addLayout(res_btns)
+        rsp_lay.addLayout(res_btns)
+        ml.addWidget(resources_panel, 1)
         splitter.addWidget(mid)
 
         # 右侧: 预览区 + 壁纸设置
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
-        rl.addWidget(QLabel("预览:"))
+        rl.setSpacing(8)
+        rl.addWidget(_section_label("预览"))
         self.label_preview = QLabel("下载后显示预览")
         self.label_preview.setAlignment(Qt.AlignCenter)
-        self.label_preview.setMinimumHeight(200)
-        self.label_preview.setStyleSheet(
-            "background: #252940;"
-            "border: 1px solid #3a5a7a;"
-            "border-radius: 8px; color: #cccccc;")
+        self.label_preview.setMinimumHeight(_HEAD_MIN_H + 144)  # 比 info 框高一些但顶边对齐
+        self.label_preview.setStyleSheet(_HEAD_STYLE + "color: #cccccc;")
         rl.addWidget(self.label_preview)
 
         # 壁纸参数设置
@@ -733,7 +1096,14 @@ class MainWindow(QMainWindow):
 
         # 背景模式
         self.cbo_bg_mode = QComboBox()
-        self.cbo_bg_mode.addItems(["纯色背景", "莫奈渐变", "油画质感", "自动取色", "自定义图片"])
+        # 下拉框顺序: 纯色/莫奈/油画/自动/毛玻璃/极光/散景/噪点/自定义图片(最后)
+        # itemData 存真实 mode 值, 与代码内 mode==4(自定义)/mode==5(毛玻璃)等判断解耦
+        for _label, _mode in [
+            ("纯色背景", 0), ("莫奈渐变", 1), ("油画质感", 2), ("自动取色", 3),
+            ("毛玻璃", 5), ("极光渐变", 6), ("光斑散景", 7), ("噪点颗粒", 8),
+            ("自定义图片", 4),
+        ]:
+            self.cbo_bg_mode.addItem(_label, _mode)
         self.cbo_bg_mode.setToolTip("选择背景样式模式")
         self.cbo_bg_mode.currentIndexChanged.connect(self.on_bg_mode_change)
         wp_form.addRow("背景模式:", self.cbo_bg_mode)
@@ -773,23 +1143,34 @@ class MainWindow(QMainWindow):
         self.spin_scale.setRange(0.1, 5.0)
         self.spin_scale.setSingleStep(0.1)
         self.spin_scale.setValue(1.0)
-        wp_form.addRow("缩放:", self.spin_scale)
+        wp_form.addRow("缩放:", _make_number_row(self.spin_scale))
 
         self.spin_offset_x = QSpinBox()
         self.spin_offset_x.setRange(-2000, 2000)
         self.spin_offset_x.setSingleStep(10)
-        wp_form.addRow("水平偏移:", self.spin_offset_x)
+        wp_form.addRow("水平偏移:", _make_number_row(self.spin_offset_x))
 
         self.spin_offset_y = QSpinBox()
         self.spin_offset_y.setRange(-2000, 2000)
         self.spin_offset_y.setSingleStep(10)
-        wp_form.addRow("垂直偏移:", self.spin_offset_y)
+        wp_form.addRow("垂直偏移:", _make_number_row(self.spin_offset_y))
 
-        self.btn_use_breath = QPushButton("使用newbreath资源(更小更流畅)")
+        # 动态资源类型选择: newbreath (只剩一个选项, 直接隐藏下拉框, 保留对象供 settings 读取)
+        self.cbo_resource_type = QComboBox()
+        self.cbo_resource_type.addItem("newbreath呼吸立绘(流畅)", "spine_breath")
+        self.cbo_resource_type.setToolTip("预览/壁纸使用的动态资源类型")
+        self.cbo_resource_type.setCurrentIndex(0)
+        wp_form.addRow("动态资源:", self.cbo_resource_type)
+        # 隐藏整行 (label + field)
+        lbl_resource = wp_form.labelForField(self.cbo_resource_type)
+        if lbl_resource:
+            lbl_resource.setVisible(False)
+        self.cbo_resource_type.setVisible(False)
+        # 保留 btn_use_breath 兼容旧引用 (隐藏, 默认 checked)
+        self.btn_use_breath = QPushButton()
         self.btn_use_breath.setCheckable(True)
         self.btn_use_breath.setChecked(True)
-        self.btn_use_breath.setToolTip("默认用petmovie(newbreath),取消勾选改用petfightassets(战斗立绘)")
-        wp_form.addRow(self.btn_use_breath)
+        self.btn_use_breath.setVisible(False)
 
         rl.addWidget(wp_box)
 
@@ -851,18 +1232,79 @@ class MainWindow(QMainWindow):
         return None
 
     # ============ 搜索 ============
+    def _on_batch_mode_changed(self, state):
+        """批量模式切换时更新placeholder和复选框"""
+        if state == Qt.Checked:
+            self.input_search.setPlaceholderText("单ID: 5943  区间: 5000-6000  多ID: 5000,5001,5002  混合: 5000-5010,6000-6005")
+            self.chk_check_res.setEnabled(True)
+        else:
+            self.input_search.setPlaceholderText("单ID: 5943  区间: 5000-6000  多ID: 5000,5001,5002")
+            self.chk_check_res.setEnabled(False)
+            self.chk_check_res.setChecked(False)
+
     def on_search(self):
         keyword = self.input_search.text().strip()
         if not keyword:
             QMessageBox.warning(self, "提示", "请输入ID或名称")
             return
-        self.log_msg(f"搜索: {keyword}")
-        self.list_results.clear()
-        self.btn_search.setEnabled(False)
-        self.thread_search = SearchThread(self.api, keyword)
-        self.thread_search.result_signal.connect(self.on_search_done)
-        self.thread_search.error_signal.connect(self.on_search_error)
-        self.thread_search.start()
+
+        # 批量模式: 解析ID列表, 批量搜索
+        if self.chk_batch.isChecked():
+            id_list = parse_id_range(keyword)
+            if not id_list:
+                QMessageBox.warning(self, "提示", "无法解析ID输入, 请使用: 5000-6000 或 5000,5001")
+                return
+            if len(id_list) > 2000:
+                ret = QMessageBox.question(
+                    self, "批量搜索",
+                    f"共解析到 {len(id_list)} 个ID, 可能会很慢。是否继续?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                if ret != QMessageBox.Yes:
+                    return
+            self.log_msg(f"批量搜索: {len(id_list)} 个ID" +
+                        (" (含资源检测)" if self.chk_check_res.isChecked() else ""))
+            self.list_results.clear()
+            self.btn_search.setEnabled(False)
+            self.progress.setValue(0)
+            self.thread_batch = BatchSearchThread(
+                self.api, id_list,
+                check_resources=self.chk_check_res.isChecked()
+            )
+            self.thread_batch.progress_signal.connect(self.on_batch_progress)
+            self.thread_batch.result_signal.connect(self.on_batch_done)
+            self.thread_batch.error_signal.connect(self.on_batch_error)
+            self.thread_batch.start()
+        else:
+            # 普通搜索 (单ID或名称)
+            self.log_msg(f"搜索: {keyword}")
+            self.list_results.clear()
+            self.btn_search.setEnabled(False)
+            self.thread_search = SearchThread(self.api, keyword)
+            self.thread_search.result_signal.connect(self.on_search_done)
+            self.thread_search.error_signal.connect(self.on_search_error)
+            self.thread_search.start()
+
+    def on_batch_progress(self, pct, msg):
+        self.progress.setValue(pct)
+        self.statusBar().showMessage(msg)
+        self.log_msg(msg)
+
+    def on_batch_done(self, results):
+        self.btn_search.setEnabled(True)
+        self.progress.setValue(100)
+        for pid, name in results:
+            item = QListWidgetItem(f"[{pid}] {name}")
+            item.setData(Qt.UserRole, (pid, name))
+            self.list_results.addItem(item)
+        self.log_msg(f"批量搜索完成: {len(results)} 个结果")
+        self.statusBar().showMessage(f"找到 {len(results)} 个宠物, 双击查看详情")
+
+    def on_batch_error(self, err):
+        self.btn_search.setEnabled(True)
+        self.progress.setValue(0)
+        self.log_msg(f"批量搜索失败: {err}")
+        QMessageBox.warning(self, "批量搜索失败", err)
 
     def on_search_done(self, results):
         self.btn_search.setEnabled(True)
@@ -928,17 +1370,16 @@ class MainWindow(QMainWindow):
         self.btn_detect.setEnabled(True)
         self.current_resources = resources
 
-        # 显示宠物信息
+        # 显示宠物信息（标题已由「宠物信息」section label 独立展示，内容不再重复前缀）
         if info:
-            info_text = (f"宠物信息: [{info.get('id','')}] {info.get('name','')}\n"
+            info_text = (f"[{info.get('id','')}] {info.get('name','')}\n"
                          f"属性: {info.get('elements','')}  系别: {info.get('types','')}\n"
                          f"描述: {info.get('description','')[:60]}")
         else:
-            info_text = f"宠物信息: [{self.current_pet_id}] {self.current_pet_name}"
+            info_text = f"[{self.current_pet_id}] {self.current_pet_name}"
         self.label_pet_info.setText(info_text)
 
         # 显示资源列表
-        has_fight = False
         has_breath = False
         for r in resources:
             text = f"[{r['type']}] {r['desc']} - {os.path.basename(r['path'])}"
@@ -946,19 +1387,31 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, r)
             item.setCheckState(Qt.Checked)
             self.list_resources.addItem(item)
-            if r['type'] == 'spine_fight':
-                has_fight = True
-            elif r['type'] == 'spine_breath':
+            if r['type'] == 'spine_breath':
                 has_breath = True
 
-        # 自动选择可用的Spine资源类型(优先newbreath)
+        # 自动选择可用的Spine资源类型
         if has_breath:
-            self.btn_use_breath.setChecked(True)
-        elif has_fight:
-            self.btn_use_breath.setChecked(False)
+            self.cbo_resource_type.setCurrentIndex(0)
 
         self.log_msg(f"检测到 {len(resources)} 个资源")
         self.statusBar().showMessage(f"检测到 {len(resources)} 个资源")
+
+        # 立即下载静态大立绘做预览（让右侧预览框立刻出现大图）
+        if self.current_pet_id:
+            pid = self.current_pet_id
+            static_path = PET_ICON_PATH.format(id=pid, frame=1)
+            local_static = self.api.download_resource(
+                static_path, self.download_dir, f"peticon_{pid}_large.png"
+            )
+            if local_static and os.path.exists(local_static):
+                pix = QPixmap(local_static)
+                if not pix.isNull():
+                    scaled = pix.scaled(
+                        self.label_preview.size(),
+                        Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    )
+                    self.label_preview.setPixmap(scaled)
 
         # 输入ID触发的自动下载
         if self._auto_download:
@@ -1026,17 +1479,45 @@ class MainWindow(QMainWindow):
     def on_download_done(self, ok, msg):
         self.log_msg(f"下载{'成功' if ok else '失败'}: {msg}")
         if ok:
-            # 显示第一张PNG预览
-            for f in self.current_saved_files:
-                if f.lower().endswith(".png"):
-                    pix = QPixmap(f)
-                    if not pix.isNull():
-                        scaled = pix.scaled(
-                            self.label_preview.size(),
-                            Qt.KeepAspectRatio, Qt.SmoothTransformation
-                        )
-                        self.label_preview.setPixmap(scaled)
-                    break
+            # 优先显示静态大立绘 (frame=1 是大图, frame=0 是小图标)
+            # 路径: peticon/newlarge/type1/peticon{id}/peticon{id}_1.png
+            pid = self.current_pet_id
+            static_path = PET_ICON_PATH.format(id=pid, frame=1)
+            local_static = self.api.download_resource(
+                static_path, self.download_dir, f"peticon_{pid}_large.png"
+            )
+            pix = None
+            if local_static and os.path.exists(local_static):
+                pix = QPixmap(local_static)
+
+            # 回退: 找下载文件里最大的 PNG (大概率是图集, 但总比小碎片好)
+            if pix is None or pix.isNull():
+                best_png = None
+                best_size = 0
+                for f in self.current_saved_files:
+                    if not f.lower().endswith(".png"):
+                        continue
+                    try:
+                        sz = os.path.getsize(f)
+                    except OSError:
+                        continue
+                    if sz > best_size:
+                        best_size = sz
+                        best_png = f
+                if best_png:
+                    pix = QPixmap(best_png)
+
+            if pix and not pix.isNull():
+                scaled = pix.scaled(
+                    self.label_preview.size(),
+                    Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
+                self.label_preview.setPixmap(scaled)
+            else:
+                self.label_preview.setText("下载完成\n(无可用预览图)")
+                self.label_preview.setStyleSheet(
+                    _HEAD_STYLE + "color: #888888;")
+
             self.statusBar().showMessage("下载完成")
         else:
             QMessageBox.warning(self, "下载失败", msg)
@@ -1060,12 +1541,13 @@ class MainWindow(QMainWindow):
     def on_bg_mode_change(self, index):
         """背景模式切换时更新预览"""
         # 自定义图片模式显示图片选择行
-        self.img_row_widget.setVisible(index == 4)
+        mode = self.cbo_bg_mode.currentData()
+        self.img_row_widget.setVisible(mode == 4)
         self.update_bg_preview()
 
     def update_bg_preview(self):
         """更新背景预览标签"""
-        mode = self.cbo_bg_mode.currentIndex()
+        mode = self.cbo_bg_mode.currentData()
         if mode == 4:
             # 自定义图片模式
             img_path = self.input_bg_image.text().strip()
@@ -1189,6 +1671,26 @@ class MainWindow(QMainWindow):
             if not palette:
                 palette = self._monet_palette_from_color(bg_color)
             return self._make_gradient_css(palette, "auto")
+        elif mode == 5:  # 毛玻璃 (QLabel 无法显示伪元素, 只预览底层渐变)
+            palette = self._extract_palette_from_png(png_path) if png_path else None
+            if not palette:
+                palette = self._monet_palette_from_color(bg_color)
+            return self._make_gradient_css(palette, "monet")
+        elif mode == 6:  # 极光渐变
+            palette = self._extract_palette_from_png(png_path) if png_path else None
+            if not palette:
+                palette = self._monet_palette_from_color(bg_color)
+            return WallpaperThread._make_aurora(palette, bg_color)
+        elif mode == 7:  # 光斑散景
+            palette = self._extract_palette_from_png(png_path) if png_path else None
+            if not palette:
+                palette = self._monet_palette_from_color(bg_color)
+            return WallpaperThread._make_bokeh(palette, bg_color)
+        elif mode == 8:  # 噪点颗粒 (QLabel 看不到伪元素覆盖层, 只预览渐变底)
+            palette = self._extract_palette_from_png(png_path) if png_path else None
+            if not palette:
+                palette = self._monet_palette_from_color(bg_color)
+            return self._make_gradient_css(palette, "monet")
         return f"background: {bg_color};"
 
     def _monet_palette_from_color(self, color_str):
@@ -1265,7 +1767,7 @@ class MainWindow(QMainWindow):
             return f"background: linear-gradient({angle}deg, {stops});"
 
     def get_wallpaper_settings(self):
-        mode = self.cbo_bg_mode.currentIndex()
+        mode = self.cbo_bg_mode.currentData()
         bg_color = self.input_bg_color.text().strip() or "#000000"
         bg_image = self.input_bg_image.text().strip() if mode == 4 else ""
         return {
@@ -1276,7 +1778,7 @@ class MainWindow(QMainWindow):
             "scale": self.spin_scale.value(),
             "offset_x": self.spin_offset_x.value(),
             "offset_y": self.spin_offset_y.value(),
-            "resource_type": "spine_breath" if self.btn_use_breath.isChecked() else "spine_fight",
+            "resource_type": self.cbo_resource_type.currentData() or "spine_breath",
         }
 
     # ============ 本地HTTP预览服务器 ============
@@ -1368,7 +1870,7 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
             QMessageBox.warning(self, "预览失败",
                 "Spine资源下载失败,可能此宠物没有动态立绘\n"
-                "可尝试勾选「使用newbreath资源」再试")
+                "可尝试切换「动态资源」下拉框选择其它类型再试")
             return
 
         self.progress.setValue(60)
@@ -1391,21 +1893,33 @@ class MainWindow(QMainWindow):
         bg_mode = settings.get("bg_mode", 0)
         bg_color = settings.get("bg_color", "#000000")
         bg_image = settings.get("bg_image", "")
+        extra_css = ""
+        real_png = png_file if png_file and os.path.exists(png_file) else None
         if bg_mode == 4:
             # 自定义图片模式: 复制背景图到预览目录
             if bg_image and os.path.isfile(bg_image):
                 shutil.copy(bg_image, os.path.join(preview_dir, os.path.basename(bg_image)))
             bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, None, bg_image)
-        elif bg_mode > 0 and png_file and os.path.exists(png_file):
-            bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, png_file)
+        elif bg_mode == 5:
+            # 毛玻璃模式: body 透明, 模糊渐变层由 EXTRA_CSS 注入
+            bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+            extra_css = WallpaperThread._compute_glass_css(bg_color, real_png)
+        elif bg_mode == 8:
+            # 噪点颗粒: 渐变底 + 噪点覆盖层
+            bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+            extra_css = WallpaperThread._compute_grain_extra_css()
         else:
-            bg_css = settings.get("bg_css", f"background: {bg_color};")
+            if real_png:
+                bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+            else:
+                bg_css = settings.get("bg_css", f"background: {bg_color};")
 
         html = tpl.replace("{{SKEL_FILE}}", os.path.basename(skel_file)) \
                   .replace("{{ATLAS_FILE}}", os.path.basename(atlas_file)) \
                   .replace("{{TEXTURE_FILE}}", os.path.basename(png_file)) \
                   .replace("{{SKEL_TYPE}}", skel_type) \
                   .replace("{{BG_CSS}}", bg_css) \
+                  .replace("{{EXTRA_CSS}}", extra_css) \
                   .replace("{{BG_COLOR}}", bg_color) \
                   .replace("{{CAMERA_SCALE}}", str(settings["scale"])) \
                   .replace("{{CAMERA_OFFSET_X}}", str(settings["offset_x"])) \
@@ -1488,7 +2002,7 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
             QMessageBox.warning(self, "导出失败",
                 "Spine资源下载失败,可能此宠物没有动态立绘\n"
-                "可尝试勾选「使用newbreath资源」再试")
+                "可尝试切换「动态资源」下拉框选择其它类型再试")
             return
 
         self.progress.setValue(60)
@@ -1507,8 +2021,36 @@ class MainWindow(QMainWindow):
         with open(tpl_path, "r", encoding="utf-8") as f:
             tpl = f.read()
 
-        # 获取背景色
+        # 获取背景信息 (与壁纸模板保持一致的完整背景计算)
+        bg_mode = settings.get("bg_mode", 0)
         bg_color = settings.get("bg_color", "#2a2b33")
+        bg_image = settings.get("bg_image", "")
+        real_png = png_file if png_file and os.path.exists(png_file) else None
+        extra_css = ""
+        bg_image_filename = ""
+        bg_palette_json = "[]"
+        if bg_mode == 4:
+            bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, None, bg_image)
+            if bg_image and os.path.isfile(bg_image):
+                bg_image_filename = os.path.basename(bg_image)
+                shutil.copy(bg_image, os.path.join(preview_dir, bg_image_filename))
+        elif bg_mode == 5:
+            bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+            extra_css = WallpaperThread._compute_glass_css(bg_color, real_png)
+        elif bg_mode == 8:
+            bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+            extra_css = WallpaperThread._compute_grain_extra_css()
+        else:
+            if real_png:
+                bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+            else:
+                bg_css = settings.get("bg_css", f"background: {bg_color};")
+        # 供 JS 渲染背景用的调色板
+        try:
+            palette = WallpaperThread._get_or_build_palette(bg_color, bg_mode, real_png)
+            bg_palette_json = json.dumps(palette)
+        except Exception:
+            bg_palette_json = "[]"
         
         # 根据立绘尺寸计算合适的GIF尺寸
         gif_width = 600
@@ -1533,6 +2075,11 @@ class MainWindow(QMainWindow):
                   .replace("{{TEXTURE_FILE}}", os.path.basename(png_file)) \
                   .replace("{{SKEL_TYPE}}", skel_type) \
                   .replace("{{BG_COLOR}}", bg_color) \
+                  .replace("{{BG_CSS}}", bg_css) \
+                  .replace("{{EXTRA_CSS}}", extra_css) \
+                  .replace("{{BG_IMAGE_FILE}}", bg_image_filename) \
+                  .replace("{{BG_MODE}}", str(bg_mode)) \
+                  .replace("{{BG_PALETTE}}", bg_palette_json) \
                   .replace("{{CAMERA_SCALE}}", str(settings["scale"])) \
                   .replace("{{CAMERA_OFFSET_X}}", str(settings["offset_x"])) \
                   .replace("{{CAMERA_OFFSET_Y}}", str(settings["offset_y"])) \

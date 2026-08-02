@@ -19,6 +19,8 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; }
     body { {{BG_CSS}} }
+    /* 扩展样式(毛玻璃伪元素/噪点覆盖层等, 未使用时为空) */
+    {{EXTRA_CSS}}
 
     #canvas {
         display: block; width: 100vw; height: 100vh;
@@ -260,9 +262,11 @@ var SKEL_FILE = "{{SKEL_FILE}}";
 var ATLAS_FILE = "{{ATLAS_FILE}}";
 var TEXTURE_FILE = "{{TEXTURE_FILE}}";
 var SKEL_TYPE = "{{SKEL_TYPE}}";
-var CAMERA_SCALE = {{CAMERA_SCALE}};
-var CAMERA_OFFSET_X = {{CAMERA_OFFSET_X}};
-var CAMERA_OFFSET_Y = {{CAMERA_OFFSET_Y}};
+
+// 相机参数（可变：可能被 Wallpaper Engine 滑块覆盖）
+var camScale = {{CAMERA_SCALE}};
+var camOffsetX = {{CAMERA_OFFSET_X}};
+var camOffsetY = {{CAMERA_OFFSET_Y}};
 
 var infoEl = document.getElementById("info");
 var loaderEl = document.getElementById("loader");
@@ -372,16 +376,23 @@ function load() {
             var rawData = assetManager.get(SKEL_FILE);
             var skeletonData = skeletonLoader.readSkeletonData(rawData);
             skeleton = new spine.Skeleton(skeletonData);
+            // 1) 显式设置 default skin, 确保附件全部绑定到 slot (必杀海报资源只在 default skin 内)
+            var defaultSkin = skeletonData.findSkin("default");
+            if (defaultSkin) skeleton.setSkin(defaultSkin);
+            // 2) slot attachment 按 skin 配置复位
+            skeleton.setSlotsToSetupPose();
+            // 3) 骨骼复位 + 第一次世界坐标计算
+            skeleton.setToSetupPose();
+            skeleton.updateWorldTransform();
             state = new spine.AnimationState(
                 new spine.AnimationStateData(skeleton.data)
             );
             var anims = skeleton.data.animations;
             if (anims && anims.length > 0) {
+                // loop=true: newbreath 持续播放, 必杀海报(空动画)保持渲染
                 state.setAnimation(0, anims[0].name, true);
                 infoEl.textContent = "动画: " + anims[0].name + " (共" + anims.length + "个)";
             }
-            skeleton.setToSetupPose();
-            skeleton.updateWorldTransform();
             setupCamera();
             lastFrameTime = Date.now() / 1000;
             hideLoader();
@@ -395,13 +406,17 @@ function load() {
 }
 
 function calculateBounds() {
+    // 确保当前帧 attachments 都就位
+    skeleton.updateWorldTransform();
     var minX = Infinity, maxX = -Infinity;
     var minY = Infinity, maxY = -Infinity;
     var slots = skeleton.slots;
     var hasVertices = false;
+    var attachedCount = 0;
     for (var i = 0; i < slots.length; i++) {
         var slot = slots[i];
         var attachment = slot.getAttachment();
+        if (attachment) attachedCount++;
         if (!attachment) continue;
         if (!(attachment instanceof spine.RegionAttachment) &&
             !(attachment instanceof spine.MeshAttachment) &&
@@ -417,12 +432,53 @@ function calculateBounds() {
             if (y < minY) minY = y; if (y > maxY) maxY = y;
         }
     }
-    if (!hasVertices) {
-        for (var i = 0; i < slots.length; i++) {
-            var bone = slots[i].bone;
-            var x = bone.worldX, y = bone.worldY;
-            if (x < minX) minX = x; if (x > maxX) maxX = x;
-            if (y < minY) minY = y; if (y > maxY) maxY = y;
+    // 如果大部分 slot 都没有 attachment: 可能 state.apply 清空了 (空动画会重置slot)
+    // -> 只做一次 setToSetupPose + setSlotsToSetupPose, 再用 skin 数据兜底计算
+    if (!hasVertices || attachedCount < Math.floor(slots.length * 0.25)) {
+        var skin = skeleton.skin || (skeleton.data && skeleton.data.defaultSkin);
+        var tmpCount = 0;
+        if (skin) {
+            for (var k = 0; k < slots.length; k++) {
+                var tmpSlot = slots[k];
+                var slotIndex = tmpSlot.data.index;
+                var tmpAtt = null;
+                try { tmpAtt = skin.getAttachment(slotIndex, tmpSlot.data.attachmentName); } catch(e){}
+                if (!tmpAtt && tmpSlot.data.attachmentName && skeleton.data.defaultSkin) {
+                    try { tmpAtt = skeleton.data.defaultSkin.getAttachment(slotIndex, tmpSlot.data.attachmentName); } catch(e){}
+                }
+                if (!tmpAtt) continue;
+                var vlen = tmpAtt.worldVerticesLength;
+                if (!vlen || vlen < 2) continue;
+                if (tmpAtt instanceof spine.RegionAttachment) {
+                    if (typeof tmpAtt.updateOffset === 'function') { try { tmpAtt.updateOffset(); } catch(e){} }
+                    var vs = new Array(8);
+                    try { tmpAtt.computeWorldVertices(tmpSlot, vs, 0, 2); } catch(e) { continue; }
+                    for (var jj = 0; jj < 8; jj += 2) {
+                        var xx = vs[jj], yy = vs[jj+1];
+                        if (xx < minX) minX = xx; if (xx > maxX) maxX = xx;
+                        if (yy < minY) minY = yy; if (yy > maxY) maxY = yy;
+                    }
+                    hasVertices = true; tmpCount++;
+                } else if (tmpAtt instanceof spine.MeshAttachment) {
+                    var vs2 = spine.Utils.newFloatArray(vlen);
+                    try { tmpAtt.computeWorldVertices(tmpSlot, 0, vlen, vs2, 0, 2); } catch(e){continue;}
+                    for (var jjm = 0; jjm < vlen; jjm += 2) {
+                        var xm = vs2[jjm], ym = vs2[jjm+1];
+                        if (xm < minX) minX = xm; if (xm > maxX) maxX = xm;
+                        if (ym < minY) minY = ym; if (ym > maxY) maxY = ym;
+                    }
+                    hasVertices = true; tmpCount++;
+                }
+            }
+        }
+        if (!hasVertices) {
+            // 最后才用骨坐标
+            for (var ii = 0; ii < slots.length; ii++) {
+                var bone = slots[ii].bone;
+                var xb = bone.worldX, yb = bone.worldY;
+                if (xb < minX) minX = xb; if (xb > maxX) maxX = xb;
+                if (yb < minY) minY = yb; if (yb > maxY) maxY = yb;
+            }
         }
     }
     if (minX === Infinity) { minX = 0; maxX = 1; minY = 0; maxY = 1; }
@@ -438,11 +494,45 @@ function setupCamera() {
     camera.position.x = cx; camera.position.y = cy; camera.position.z = 0;
     var zoomH = h / (canvas.height * 0.85);
     var zoomW = w / (canvas.width * 0.9);
-    var zoom = Math.max(zoomH, zoomW) * CAMERA_SCALE;
+    var zoom = Math.max(zoomH, zoomW) * camScale;
     camera.zoom = zoom;
-    camera.position.x += CAMERA_OFFSET_X * zoom;
-    camera.position.y += CAMERA_OFFSET_Y * zoom;
+    camera.position.x += camOffsetX * zoom;
+    camera.position.y += camOffsetY * zoom;
 }
+
+// ===== Wallpaper Engine 桥接 =====
+// 只响应 缩放 / 水平偏移 / 垂直偏移, 背景色完全由软件生成后固化, 不允许 WE 覆盖
+window.wallpaperPropertyListener = {
+    applyUserProperties: function(properties) {
+        // 缩放 (slider 整数 10~300, 实际值 = value / 100)
+        if (properties.scalectrl) {
+            var v = parseInt(properties.scalectrl.value, 10);
+            if (!isNaN(v)) {
+                camScale = v / 100;
+                console.log("[WE] scalectrl -> " + v + " (scale=" + camScale + ")");
+                if (skeleton) { setupCamera(); }
+            }
+        }
+        // 水平偏移 (slider 整数 -1000~1000)
+        if (properties.offsetx) {
+            var v = parseInt(properties.offsetx.value, 10);
+            if (!isNaN(v)) {
+                camOffsetX = v;
+                console.log("[WE] offsetx -> " + v);
+                if (skeleton) { setupCamera(); }
+            }
+        }
+        // 垂直偏移 (slider 整数 -1000~1000)
+        if (properties.offsety) {
+            var v = parseInt(properties.offsety.value, 10);
+            if (!isNaN(v)) {
+                camOffsetY = v;
+                console.log("[WE] offsety -> " + v);
+                if (skeleton) { setupCamera(); }
+            }
+        }
+    }
+};
 
 function render() {
     try {

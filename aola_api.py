@@ -18,6 +18,7 @@ BASE_URL = "https://aola.100bt.com/h5/"
 PET_SPINE_PATH = "petfightassets/spine/pet{id}/pet{id}.{ext}"   # 战斗Spine立绘
 PET_ICON_PATH = "peticon/newlarge/type1/peticon{id}/peticon{id}_{frame}.png"  # 静态立绘
 PET_MOVIE_PATH = "peticon/newbreath/petmovie{id}/petmovie{id}.{ext}"  # newbreath动态立绘
+PET_EGG_PATH = "petegg/egg{id}.png"  # 宠物蛋
 
 # 宠物字典URL
 PET_DICT_URL = BASE_URL + "data/petdictionarydata.json"
@@ -137,7 +138,7 @@ class AolaAPI:
     def get_pet_resources(self, pet_id):
         """查询某宠物所有可用资源
 
-        检查战斗Spine立绘、静态立绘、newbreath动态立绘是否存在
+        检查静态立绘、newbreath动态立绘、宠物蛋是否存在
 
         Returns:
             list of dict: [{"type","path","ext","desc"}, ...]
@@ -145,18 +146,7 @@ class AolaAPI:
         resources = []
         pid = str(pet_id)
 
-        # 1. 战斗Spine立绘 (petfightassets) - 主要资源
-        for ext in ["json", "atlas", "png"]:
-            path = PET_SPINE_PATH.format(id=pid, ext=ext)
-            if self._check_resource(path):
-                resources.append({
-                    "type": "spine_fight",
-                    "path": path,
-                    "ext": ext,
-                    "desc": "战斗Spine立绘"
-                })
-
-        # 2. 静态立绘 (peticon)
+        # 1. 静态立绘 (peticon)
         for frame in [0, 1]:
             path = PET_ICON_PATH.format(id=pid, frame=frame)
             if self._check_resource(path):
@@ -169,7 +159,7 @@ class AolaAPI:
                     "frame": frame
                 })
 
-        # 3. newbreath 动态立绘 (petmovie)
+        # 2. newbreath 动态立绘 (petmovie)
         for ext in ["json", "atlas", "png"]:
             path = PET_MOVIE_PATH.format(id=pid, ext=ext)
             if self._check_resource(path):
@@ -179,6 +169,16 @@ class AolaAPI:
                     "ext": ext,
                     "desc": "newbreath动态立绘"
                 })
+
+        # 3. 宠物蛋 (petegg) — 部分宠物有
+        path = PET_EGG_PATH.format(id=pid)
+        if self._check_resource(path):
+            resources.append({
+                "type": "petegg",
+                "path": path,
+                "ext": "png",
+                "desc": "宠物蛋"
+            })
 
         return resources
 
@@ -218,13 +218,13 @@ class AolaAPI:
             pass
         return None
 
-    def download_spine_resources(self, pet_id, out_dir, resource_type="spine_fight"):
+    def download_spine_resources(self, pet_id, out_dir, resource_type="spine_breath"):
         """下载某宠物的Spine三件套资源
 
         Args:
             pet_id: 宠物ID
             out_dir: 输出目录
-            resource_type: "spine_fight" 或 "spine_breath"
+            resource_type: "spine_breath" 目前只用 newbreath
 
         Returns:
             (success, files_dict) files_dict含 skeleton/atlas/texture 路径
@@ -232,9 +232,9 @@ class AolaAPI:
         pid = str(pet_id)
         files = {}
 
-        if resource_type == "spine_fight":
-            path_template = PET_SPINE_PATH
-            name_prefix = f"pet{pid}"
+        if resource_type == "spine_breath":
+            path_template = PET_MOVIE_PATH
+            name_prefix = f"petmovie{pid}"
         else:
             path_template = PET_MOVIE_PATH
             name_prefix = f"petmovie{pid}"
