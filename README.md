@@ -1,128 +1,113 @@
 # 奥拉星立绘提取器
 
-输入宠物 ID，一键下载奥拉星 H5 端的静态立绘和 Spine 动态立绘，并可将动态立绘导出为可导入 Wallpaper Engine 的网页壁纸。
+输入宠物 ID，一键下载奥拉星 H5 端的静态立绘和 Spine 动态立绘（newbreath 呼吸动画），支持批量搜索、多种背景样式、GIF 录制，并可导出为 Wallpaper Engine 网页壁纸。
 
 ## 功能
 
-- 输入宠物 ID → 自动下载静态立绘（PNG）
-- 自动下载 Spine 动态立绘（.sk/.json + .atlas + .png）
-- 界面内预览静态立绘
-- 一键导出 Spine 网页壁纸（可直接导入 Wallpaper Engine）
-- URL 模板可配置（抓包确认后填入 config.ini 即可）
+### 资源下载
+- 输入宠物 ID → 自动下载静态立绘（PNG）+ newbreath 呼吸动态立绘（Spine 三件套）
+- 宠物蛋资源检测与下载
+- 字典缺失的 ID 也能通过资源存在性兜底搜索（显示为 `#ID`）
 
-## 安装
+### 批量搜索
+- 支持区间输入（如 `5000-6000`）、逗号分隔（如 `5000,5001,5002`）、混合格式（如 `5000-5010,6000`）
+- 可选「检测资源」模式，仅显示有可用资源的宠物
+- 字典快速筛选 + 服务器资源实时检测
 
-需要 Python 3.10+（64位）。
+### 背景样式
+- 纯色 / 莫奈渐变 / 油画 / 极光渐变 / 光斑散景 / 噪点颗粒 / 毛玻璃
+- 自动取色：从立绘 PNG 提取主色调生成配色方案
+- 自定义图片背景
 
-### 方式一：标准安装（pip 正常时）
+### GIF 录制
+- 可调节尺寸、时长、FPS
+- 背景与预览一致（渐变/极光/散景/噪点/毛玻璃/图片均支持）
+- 录制完成后自动保存到 `downloads/gif_output/`
 
-```bash
-pip install -r requirements.txt
-```
-
-### 方式二：PowerShell 安装脚本（pip 有 SSL/网络问题时）
-
-如果 `pip install` 报 SSL 错误（如 `check_hostname requires server_hostname`），
-用项目自带的安装脚本（通过 PowerShell 下载 wheel 本地安装，绕过 Python SSL 问题）：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-脚本会自动下载所有 wheel 到 `wheels/` 目录并本地安装。
-已验证版本：PyQt5 5.15.11 + PyQt5-Qt5 5.15.2（5.15.15+ 无 Windows wheel）。
-
-## 运行
-
-```bash
-python main.py
-```
+### Wallpaper Engine 导出
+- 一键导出网页壁纸，可直接导入 Wallpaper Engine
+- 支持缩放、水平/垂直偏移调节
+- 导出后保留背景样式
 
 ## 使用方法
 
-1. 打开软件，在顶部输入宠物 ID（纯数字）
-2. 点击「一键下载」或单独点击「仅静态立绘」/「仅动态立绘」
-3. 下载完成后左侧预览静态立绘，右侧查看日志
-4. 动态立绘下载成功后，点击「导出为壁纸」生成网页壁纸
-5. 导出后会自动打开壁纸文件夹
+### 方式一：直接运行 exe（推荐）
 
-## 关键：确认 URL 规律（首次使用必看）
+下载 `dist/AolaPetTool.exe`，双击即可运行，无需安装 Python。
 
-软件默认的 URL 模板是**推测值**，可能和实际不同。如果下载失败，需要抓包确认真实 URL：
+### 方式二：从源码运行
 
-### 抓包步骤
-
-1. 用 Chrome 打开奥拉星 H5：https://aola.100bt.com/h5/
-2. 按 F12 → 切到 Network 面板
-3. 在游戏里打开图鉴 / 进入有宠物立绘的场景
-4. 在 Network 里筛选 `.png` 或 `.sk` 或 `.atlas`
-5. 找到立绘资源，右键 → Copy → Copy link address
-6. 观察规律，例如：
-   - `https://aola.100bt.com/h5/res/pet/12345.png`
-   - `https://aola.100bt.com/h5/res/spine/12345.sk`
-
-### 修改 config.ini
-
-把观察到的真实 URL 填入 config.ini 对应模板，`{id}` 代表宠物 ID：
-
-```ini
-[static]
-url_template = https://真实路径/{id}.png
-
-[spine]
-skeleton_url_template = https://真实路径/{id}.sk
-atlas_url_template = https://真实路径/{id}.atlas
-texture_url_template = https://真实路径/{id}.png
+```bash
+pip install -r requirements.txt
+python main.py
 ```
 
-保存后重新运行软件即可。
+### 基本操作
 
-## 导入 Wallpaper Engine
+1. 在顶部输入宠物 ID（纯数字），或勾选「批量模式」输入 ID 区间
+2. 点击搜索，左侧列表显示结果
+3. 选中宠物后下载静态立绘 / newbreath 动态立绘
+4. 下载完成后可预览、调节缩放和位置、选择背景样式
+5. 点击「导出为壁纸」生成 Wallpaper Engine 网页壁纸
+6. 点击「导出为 GIF」录制动态立绘 GIF
 
-1. 在软件里「导出为壁纸」后，会生成 `wallpapers/pet_XXXXX/` 文件夹，内含 `index.html` 和资源文件
-2. 打开 Wallpaper Engine
-3. 点击「打开壁纸编辑器」→ 选择「网页壁纸」类型
-4. 文件 → 导入 → 选择刚才生成的 `index.html`
-5. 或直接：在 Wallpaper Engine 主界面 → 打开壁纸 → 选择该文件夹的 `index.html`
+### 导入 Wallpaper Engine
 
-> 网页壁纸需要联网加载 Spine 运行时（CDN）。如需离线使用，把 `spine-webgl.min.js` 下载到壁纸文件夹并修改 index.html 的 script 路径即可。
+1. 软件中「导出为壁纸」后会生成 `wallpapers/pet_XXXXX/` 文件夹
+2. 打开 Wallpaper Engine → 打开壁纸编辑器 → 选择「网页壁纸」
+3. 文件 → 导入 → 选择生成的 `index.html`
 
-## 目录结构
+## 项目结构
 
 ```
 项目根目录/
-├── main.py                  # 主程序(GUI)
-├── config.ini               # URL模板配置(可编辑)
+├── main.py                  # 主程序(GUI + 业务逻辑)
+├── aola_api.py              # 奥拉星 API 交互(资源检测/下载)
+├── config.ini               # URL模板配置
+├── style.qss                # Qt 界面样式表
 ├── requirements.txt         # 依赖清单
-├── install.ps1              # 备用安装脚本(pip SSL问题时用)
-├── core/
-│   ├── url_config.py        # 配置读取
-│   ├── fetcher.py           # 资源下载器
-│   └── spine_exporter.py    # Spine壁纸生成器
+├── AolaPetTool.spec         # PyInstaller 打包配置
 ├── web/
-│   └── spine_viewer_template.html  # 壁纸HTML模板
-├── wheels/                  # wheel缓存(install.ps1用)
-├── assets/                  # 下载的资源(运行时生成)
+│   ├── wallpaper_template.html   # 壁纸HTML模板
+│   ├── gif_template.html         # GIF录制HTML模板
+│   └── spine-webgl.js            # Spine 运行时(已内嵌)
+├── downloads/               # 下载的资源(运行时生成)
 │   ├── static/{id}/{id}.png
-│   └── spine/{id}/{id}.sk + .atlas + .png
+│   ├── spine/{id}/  (json + atlas + png)
+│   └── gif_output/          # GIF 输出目录
 └── wallpapers/              # 导出的壁纸(运行时生成)
     └── pet_{id}/
         ├── index.html
-        ├── skeleton.sk
-        ├── texture.atlas
-        └── texture.png
+        ├── spine.json
+        ├── spine.atlas
+        └── spine.png
 ```
+
+## 打包
+
+```bash
+pyinstaller AolaPetTool.spec --noconfirm
+```
+
+生成 `dist/AolaPetTool.exe`（约 46 MB，单文件，已内嵌所有资源）。
+
+## 技术栈
+
+- Python 3.10+ / PyQt5
+- Spine WebGL Runtime 3.8（动态立绘渲染）
+- Pillow（图片处理/主色调提取/GIF生成）
+- PyInstaller（打包为 exe）
 
 ## 常见问题
 
-**Q: 下载失败怎么办？**
-A: 99% 是 URL 模板不对，按上面的「抓包步骤」确认真实 URL 并修改 config.ini。
+**Q: 搜不到某个宠物 ID？**
+A: 宠物字典可能未收录新宠物。勾选批量模式 +「检测资源」，或直接搜该 ID，软件会检测服务器上是否存在资源。
 
-**Q: 动态立绘导出后壁纸是黑屏？**
-A: 可能是 Spine 版本不匹配。奥拉星用的是 Spine 3.8，模板已配 3.8 runtime。如果仍然黑屏，检查浏览器控制台报错，可能需要换 runtime 版本。
+**Q: 动态立绘预览是黑屏？**
+A: 确保网络可访问奥拉星 H5 资源服务器。软件需要联网加载 Spine 资源。
 
-**Q: 可以批量下载吗？**
-A: 当前版本一次一个 ID。需要批量可在命令行循环调用，或后续扩展批量功能。
+**Q: GIF 录制不完整？**
+A: GIF 尺寸已自动按立绘比例计算，camera 会按目标 canvas 独立计算缩放，确保完整录制。如仍有问题可手动调整录制尺寸。
 
-**Q: 皮肤立绘怎么下载？**
-A: 皮肤的 URL 规律可能和宠物不同（可能带 skin ID 或后缀），抓包确认后在 config.ini 增加对应模板。
+**Q: 导出壁纸后背景不生效？**
+A: 软件内预览和壁纸导出使用相同的背景计算逻辑。Wallpaper Engine 中如需调节，使用右侧控制面板的缩放和偏移即可。
