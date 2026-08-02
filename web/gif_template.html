@@ -847,23 +847,38 @@ function render() {
 }
 
 function sendFrameToServer(frameDataUrl, frameIndex, totalFrames) {
-    return new Promise(function(resolve, reject) {
-        var xhr = new XMLHttpRequest();
-        xhr.open("POST", "/upload-frame", true);
-        xhr.setRequestHeader("Content-Type", "application/json");
-        xhr.timeout = 30000;
-        xhr.onload = function() {
-            if (xhr.status >= 200 && xhr.status < 300) {
-                resolve(JSON.parse(xhr.responseText));
-            } else { reject(new Error("上传失败: HTTP " + xhr.status)); }
-        };
-        xhr.onerror = function() { reject(new Error("网络连接错误")); };
-        xhr.ontimeout = function() { reject(new Error("上传超时")); };
-        var data = JSON.stringify({
-            frame_index: frameIndex, total_frames: totalFrames, data_url: frameDataUrl
+    // 单帧上传带重试, 避免一次网络抖动导致整个录制中断
+    var maxRetry = 2;
+    function attempt(retryLeft) {
+        return new Promise(function(resolve, reject) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", "/upload-frame", true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.timeout = 30000;
+            xhr.onload = function() {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve(JSON.parse(xhr.responseText));
+                } else if (retryLeft > 0) {
+                    setTimeout(function() { resolve(attempt(retryLeft - 1)); }, 300);
+                } else { reject(new Error("上传失败: HTTP " + xhr.status)); }
+            };
+            xhr.onerror = function() {
+                if (retryLeft > 0) {
+                    setTimeout(function() { resolve(attempt(retryLeft - 1)); }, 300);
+                } else { reject(new Error("网络连接错误")); }
+            };
+            xhr.ontimeout = function() {
+                if (retryLeft > 0) {
+                    setTimeout(function() { resolve(attempt(retryLeft - 1)); }, 500);
+                } else { reject(new Error("上传超时")); }
+            };
+            var data = JSON.stringify({
+                frame_index: frameIndex, total_frames: totalFrames, data_url: frameDataUrl
+            });
+            xhr.send(data);
         });
-        xhr.send(data);
-    });
+    }
+    return attempt(maxRetry);
 }
 
 function requestGifGeneration(totalFrames, fps, width, height, bgColor) {
@@ -875,10 +890,18 @@ function requestGifGeneration(totalFrames, fps, width, height, bgColor) {
         xhr.onload = function() {
             if (xhr.status >= 200 && xhr.status < 300) {
                 resolve(JSON.parse(xhr.responseText));
-            } else { reject(new Error("GIF 生成失败: HTTP " + xhr.status)); }
+            } else {
+                // 解析后端返回的具体错误(如帧数据不完整), 便于定位
+                var detail = "GIF 生成失败: HTTP " + xhr.status;
+                try {
+                    var r = JSON.parse(xhr.responseText);
+                    if (r.message) detail = r.message;
+                } catch(_) {}
+                reject(new Error(detail));
+            }
         };
         xhr.onerror = function() { reject(new Error("网络连接错误")); };
-        xhr.ontimeout = function() { reject(new Error("GIF 生成超时")); };
+        xhr.ontimeout = function() { reject(new Error("GIF 生成超时(>120s), 请降低分辨率或帧率后重试")); };
         var data = JSON.stringify({
             total_frames: totalFrames, fps: fps, width: width,
             height: height, bg_color: bgColor
@@ -903,6 +926,20 @@ recordBtn.addEventListener("click", async function() {
     var progressText = document.getElementById("progress-text");
     progressContainer.style.display = "block";
 
+    // 录制前清空服务器端当前会话的帧数据, 避免上轮残帧污染本轮录制
+    try {
+        await new Promise(function(resolve) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", "/clear-frames", true);
+            xhr.timeout = 5000;
+            xhr.onload = function() { resolve(); };
+            xhr.onerror = function() { resolve(); };
+            xhr.ontimeout = function() { resolve(); };
+            xhr.send("{}");
+        });
+    } catch(e) { /* 清空失败不阻塞录制 */ }
+
+    var targetGl = null;  // 录制用 WebGL context, finally 中释放
     try {
         progressText.innerHTML = "构建录制画布 <strong>0</strong>/" + totalFrames;
         var offscreenCanvas = document.createElement('canvas');
@@ -910,7 +947,7 @@ recordBtn.addEventListener("click", async function() {
         var offscreenCtx = offscreenCanvas.getContext('2d');
         var targetCanvas = document.createElement('canvas');
         targetCanvas.width = width; targetCanvas.height = height;
-        var targetGl = targetCanvas.getContext('webgl', { alpha: true });
+        targetGl = targetCanvas.getContext('webgl', { alpha: true });
         var targetSceneRenderer = new spine.webgl.SceneRenderer(targetCanvas, targetGl, false);
         var targetAssetManager = new spine.webgl.AssetManager(targetGl);
         var img = new Image();
@@ -1005,11 +1042,28 @@ recordBtn.addEventListener("click", async function() {
         setStatus("✓ GIF 生成完成");
 
     } catch (e) {
-        setStatus("录制错误: " + e.message);
+        var errMsg = e.message;
+        // 后端返回的具体错误信息(如帧数据不完整)更可读
+        try {
+            if (e && e.message && e.message.indexOf('{') !== -1) {
+                var m = JSON.parse(e.message);
+                if (m.message) errMsg = m.message;
+            }
+        } catch(_) {}
+        setStatus("录制错误: " + errMsg);
         console.error(e);
-        progressText.innerHTML = "<span style='color:#ff4d6d'>失败: " + e.message + "</span>";
-        setTimeout(function() { progressContainer.style.display = "none"; }, 2500);
+        progressText.innerHTML = "<span style='color:#ff4d6d'>失败: " + errMsg + "</span>";
+        setTimeout(function() { progressContainer.style.display = "none"; }, 3500);
     } finally {
+        // 释放录制用 WebGL context, 避免多次录制后 context 泄漏导致渲染失败
+        try {
+            if (targetGl) {
+                var loseExt = targetGl.getExtension('WEBGL_lose_context');
+                if (loseExt) loseExt.loseContext();
+            }
+        } catch(e) {}
+        window._targetSkeleton = null;
+        window._targetState = null;
         recordBtn.disabled = false;
         recordBtn.textContent = "🎬 开始录制 GIF";
         recordBtn.classList.remove("recording");

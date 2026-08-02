@@ -83,11 +83,26 @@ def _make_number_row(spin):
 
 
 def _get_base_dir():
-    """获取应用根目录，兼容 PyInstaller 打包"""
+    """获取应用根目录，兼容 PyInstaller 打包
+
+    PyInstaller --onefile 模式下, 内嵌资源(web/, style.qss 等)解压到 sys._MEIPASS;
+    用户数据(downloads/, wallpapers/)应放在 exe 所在目录。
+    这里返回资源目录, 用户数据目录用 _get_data_dir() 单独获取。
+    """
     if getattr(sys, "frozen", False):
-        # PyInstaller 打包后，exe 所在目录
+        # PyInstaller 打包: 内嵌资源在 _MEIPASS 临时目录
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return meipass
         return os.path.dirname(os.path.abspath(sys.executable))
     # 源代码模式
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _get_data_dir():
+    """获取用户数据目录(downloads/wallpapers), 打包后为 exe 所在目录"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -796,6 +811,22 @@ class GifRecorderHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    @staticmethod
+    def _log(msg):
+        """记录GIF录制调试日志到文件, 便于定位"无法保存"类问题"""
+        try:
+            out = GifRecorderHandler.gif_output_path
+            if out:
+                log_dir = os.path.dirname(out)
+            else:
+                import tempfile
+                log_dir = tempfile.gettempdir()
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, "gif_recorder.log"), "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}\n")
+        except Exception:
+            pass
+
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length)
@@ -804,6 +835,8 @@ class GifRecorderHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_upload_frame(body)
         elif self.path == '/generate-gif':
             self._handle_generate_gif(body)
+        elif self.path == '/clear-frames':
+            self._handle_clear_frames(body)
         else:
             self.send_error(404)
 
@@ -812,6 +845,14 @@ class GifRecorderHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_get_gif()
         else:
             super().do_GET()
+
+    def _handle_clear_frames(self, body):
+        """清空当前会话的帧数据, 确保每次录制从干净状态开始(避免残帧污染)"""
+        session = GifRecorderHandler.gif_session_id
+        if session:
+            GifRecorderHandler.frame_store.pop(session, None)
+            self._log(f"清空会话帧: session={session}")
+        self._send_json(200, json.dumps({'status': 'ok'}))
 
     def _handle_upload_frame(self, body):
         try:
@@ -828,16 +869,21 @@ class GifRecorderHandler(http.server.SimpleHTTPRequestHandler):
                 GifRecorderHandler.frame_store[session] = {}
             GifRecorderHandler.frame_store[session][frame_index] = img_bytes
 
+            stored = len(GifRecorderHandler.frame_store[session])
+            self._log(f"上传帧 {frame_index}/{total_frames} session={session} "
+                      f"bytes={len(img_bytes)} 已存={stored}")
             response = json.dumps({
                 'status': 'ok',
                 'frame': frame_index,
-                'stored': len(GifRecorderHandler.frame_store[session])
+                'stored': stored
             })
             self._send_json(200, response)
         except Exception as e:
+            self._log(f"上传帧失败 frame={data.get('frame_index') if isinstance(data, dict) else '?'}: {e}")
             self._send_json(500, json.dumps({'status': 'error', 'message': str(e)}))
 
     def _handle_generate_gif(self, body):
+        session = GifRecorderHandler.gif_session_id
         try:
             data = json.loads(body.decode('utf-8'))
             total_frames = data['total_frames']
@@ -847,22 +893,39 @@ class GifRecorderHandler(http.server.SimpleHTTPRequestHandler):
             bg_color = data.get('bg_color', '#2a2b33')
             duration_ms = int(1000 / fps)
 
-            session = GifRecorderHandler.gif_session_id
             frames_dict = GifRecorderHandler.frame_store.get(session, {})
 
-            if len(frames_dict) < total_frames:
+            self._log(f"生成GIF: 期望{total_frames}帧 fps={fps} 尺寸={width}x{height} "
+                      f"实际存帧={len(frames_dict)} session={session}")
+
+            # 严格检查: 帧索引必须是 0..total_frames-1 连续, 避免残帧污染
+            expected = set(range(total_frames))
+            actual = set(frames_dict.keys())
+            missing = expected - actual
+            extra = actual - expected
+
+            if missing:
+                self._log(f"帧数据不完整: 缺失{len(missing)}帧 索引={sorted(missing)[:20]} "
+                          f"额外残帧={len(extra)}")
                 self._send_json(500, json.dumps({
                     'status': 'error',
-                    'message': f'帧数据不完整: 期望{total_frames}帧, 实际{len(frames_dict)}帧'
+                    'message': f'帧数据不完整: 期望{total_frames}帧, 缺失{len(missing)}帧 '
+                               f'(缺失索引: {sorted(missing)[:10]})。'
+                               f'可能是上传中断, 请重新录制。'
                 }))
+                # 失败时清理残帧, 避免影响下次录制
+                GifRecorderHandler.frame_store.pop(session, None)
                 return
+
+            if extra:
+                self._log(f"发现{len(extra)}个额外残帧(已忽略): {sorted(extra)[:20]}")
 
             from PIL import Image
 
-            sorted_frames = sorted(frames_dict.items(), key=lambda x: x[0])
+            # 只取 0..total_frames-1, 严格按索引排序, 避免残帧混入
             pil_frames = []
-
-            for idx, img_bytes in sorted_frames:
+            for idx in range(total_frames):
+                img_bytes = frames_dict[idx]
                 img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
                 if img.size != (width, height):
                     img = img.resize((width, height), Image.LANCZOS)
@@ -871,21 +934,34 @@ class GifRecorderHandler(http.server.SimpleHTTPRequestHandler):
             output_dir = os.path.dirname(GifRecorderHandler.gif_output_path)
             os.makedirs(output_dir, exist_ok=True)
             output_path = GifRecorderHandler.gif_output_path
+            tmp_path = output_path + ".tmp"
+            save_path = output_path
 
             if pil_frames:
-                first_frame = pil_frames[0]
-                first_frame.save(
-                    output_path,
+                # 先写临时文件, 再替换, 容忍目标文件被图片查看器占用
+                # 显式指定 format='GIF', 因为 .tmp 扩展名 PIL 无法自动识别格式
+                pil_frames[0].save(
+                    tmp_path,
+                    format='GIF',
                     save_all=True,
                     append_images=pil_frames[1:],
                     duration=duration_ms,
                     loop=0,
                     optimize=False
                 )
+                try:
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                    os.rename(tmp_path, output_path)
+                except PermissionError:
+                    # 目标文件被占用(用户正在查看), 保留临时文件供下载
+                    self._log(f"目标GIF被占用, 保留临时文件: {tmp_path}")
+                    save_path = tmp_path
 
             GifRecorderHandler.frame_store.pop(session, None)
+            self._log(f"GIF生成成功: {save_path} 共{len(pil_frames)}帧")
 
-            filename = os.path.basename(output_path)
+            filename = os.path.basename(save_path)
             self._send_json(200, json.dumps({
                 'status': 'ok',
                 'filename': filename,
@@ -893,20 +969,27 @@ class GifRecorderHandler(http.server.SimpleHTTPRequestHandler):
             }))
         except Exception as e:
             import traceback
+            tb = traceback.format_exc()
+            self._log(f"GIF生成异常: {e}\n{tb}")
+            # 异常时也清理帧数据, 避免残帧影响下次录制
+            GifRecorderHandler.frame_store.pop(session, None)
             self._send_json(500, json.dumps({
                 'status': 'error',
                 'message': str(e),
-                'traceback': traceback.format_exc()
+                'traceback': tb
             }))
 
     def _handle_get_gif(self):
-        if GifRecorderHandler.gif_output_path and os.path.exists(GifRecorderHandler.gif_output_path):
+        # 优先返回正式文件, 目标被占用时回退到 .tmp 文件
+        out = GifRecorderHandler.gif_output_path
+        serve = out if (out and os.path.exists(out)) else (out + ".tmp" if out and os.path.exists(out + ".tmp") else None)
+        if serve:
             self.send_response(200)
             self.send_header('Content-Type', 'image/gif')
             self.send_header('Content-Disposition',
-                             f'attachment; filename="{os.path.basename(GifRecorderHandler.gif_output_path)}"')
+                             f'attachment; filename="{os.path.basename(out)}"')
             self.end_headers()
-            with open(GifRecorderHandler.gif_output_path, 'rb') as f:
+            with open(serve, 'rb') as f:
                 self.wfile.write(f.read())
         else:
             self.send_error(404, 'GIF not found')
@@ -929,8 +1012,8 @@ class MainWindow(QMainWindow):
         self.current_saved_files = []
         self._auto_download = False
 
-        self.download_dir = os.path.join(BASE_DIR, "downloads")
-        self.wallpapers_dir = os.path.join(BASE_DIR, "wallpapers")
+        self.download_dir = os.path.join(_get_data_dir(), "downloads")
+        self.wallpapers_dir = os.path.join(_get_data_dir(), "wallpapers")
 
         self.setWindowTitle("奥拉星立绘提取器 v2.0")
         self.setMinimumSize(1100, 720)
