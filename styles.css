@@ -1,0 +1,142 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * 设计系统：奥拉星立绘提取器
+ * 深空底色 + 青蓝/星紫双辉光，科技感工具风。
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-glow: var(--primary-glow);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-display: "Chakra Petch", "Noto Sans SC", sans-serif;
+  --font-sans: "Noto Sans SC", system-ui, sans-serif;
+}
+
+:root {
+  --radius: 0.75rem;
+  --background: oklch(0.16 0.035 265);
+  --foreground: oklch(0.95 0.012 240);
+  --card: oklch(0.21 0.038 264);
+  --card-foreground: oklch(0.95 0.012 240);
+  --popover: oklch(0.21 0.038 264);
+  --popover-foreground: oklch(0.95 0.012 240);
+  --primary: oklch(0.78 0.15 195);
+  --primary-foreground: oklch(0.17 0.04 250);
+  --primary-glow: oklch(0.86 0.13 190);
+  --secondary: oklch(0.28 0.05 268);
+  --secondary-foreground: oklch(0.93 0.015 240);
+  --muted: oklch(0.25 0.04 266);
+  --muted-foreground: oklch(0.68 0.03 255);
+  --accent: oklch(0.68 0.19 300);
+  --accent-foreground: oklch(0.97 0.01 300);
+  --destructive: oklch(0.62 0.21 22);
+  --destructive-foreground: oklch(0.97 0.01 20);
+  --success: oklch(0.75 0.16 155);
+  --border: oklch(0.32 0.045 266);
+  --input: oklch(0.28 0.045 266);
+  --ring: oklch(0.78 0.15 195);
+
+  --gradient-nebula: radial-gradient(
+      ellipse 70% 55% at 15% -10%,
+      color-mix(in oklab, var(--accent) 28%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse 60% 50% at 95% 0%,
+      color-mix(in oklab, var(--primary) 22%, transparent),
+      transparent 65%
+    );
+  --gradient-primary: linear-gradient(135deg, var(--primary), var(--primary-glow));
+  --gradient-accent: linear-gradient(135deg, var(--accent), var(--primary));
+  --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 35%, transparent),
+    0 12px 40px -12px color-mix(in oklab, var(--primary) 55%, transparent);
+  --shadow-panel: 0 24px 60px -24px oklch(0.08 0.03 265 / 0.9);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    background-image: var(--gradient-nebula);
+    background-attachment: fixed;
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+  }
+}
+
+@utility panel {
+  background: color-mix(in oklab, var(--card) 78%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-panel);
+  backdrop-filter: blur(14px);
+}
+
+@utility starfield {
+  position: relative;
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: radial-gradient(1.5px 1.5px at 12% 22%, oklch(1 0 0 / 0.55), transparent),
+      radial-gradient(1.5px 1.5px at 78% 14%, oklch(1 0 0 / 0.4), transparent),
+      radial-gradient(1px 1px at 42% 68%, oklch(1 0 0 / 0.35), transparent),
+      radial-gradient(1.5px 1.5px at 88% 72%, oklch(1 0 0 / 0.45), transparent),
+      radial-gradient(1px 1px at 26% 88%, oklch(1 0 0 / 0.3), transparent),
+      radial-gradient(1px 1px at 62% 38%, oklch(1 0 0 / 0.28), transparent);
+  }
+}
+
+@utility text-gradient {
+  background: var(--gradient-accent);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@utility grid-lines {
+  background-image: linear-gradient(
+      to right,
+      color-mix(in oklab, var(--border) 55%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--border) 55%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 22px 22px;
+}
