@@ -13,3 +13,4 @@ wheels/
 *.whl
 AolaPetTool.egg-info/
 styles.css
+aochi-pet-tool/
