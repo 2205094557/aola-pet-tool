@@ -15,12 +15,14 @@ import json
 import shutil
 import webbrowser
 import threading
+import concurrent.futures
 import http.server
 import socketserver
 import io
 import base64
 import tempfile
 import uuid
+import configparser
 from datetime import datetime
 
 # PyInstaller 打包时隐藏导入的依赖
@@ -29,18 +31,31 @@ import PIL.Image
 import requests
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QPixmap, QFont, QColor
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QLockFile
+from PyQt5.QtGui import QPixmap, QFont, QColor, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
     QTabWidget, QTextEdit, QProgressBar, QStatusBar, QMessageBox,
     QGroupBox, QFormLayout, QSpinBox, QDoubleSpinBox, QColorDialog,
     QSplitter, QFrame, QComboBox, QFileDialog, QAbstractSpinBox,
-    QCheckBox
+    QCheckBox, QGraphicsDropShadowEffect
 )
 
 from aola_api import AolaAPI, PET_ICON_PATH
+from core.upscaler import ALGORITHMS, upscale_spine_assets
+import themes
+
+# Windows 11 风格窗口(圆角标题栏), 可选依赖: 未安装时自动降级为普通窗口
+try:
+    import pywinstyles
+except ImportError:
+    pywinstyles = None
+
+
+def _ui_config_path():
+    """UI 设置(主题等)配置文件: 放用户数据目录(打包后 exe 所在目录, 可写)."""
+    return os.path.join(_get_data_dir(), "ui_config.ini")
 
 
 def _make_number_row(spin):
@@ -69,7 +84,7 @@ def _make_number_row(spin):
     spin.setFrame(False)
     spin.setAlignment(Qt.AlignCenter)
     spin.setObjectName("numSpin")
-    spin.setMinimumHeight(26)
+    spin.setMinimumHeight(20)
     spin.setStyleSheet(spin.styleSheet())  # 继承全局 QSS,同时确保 objectName 生效
 
     # 按钮行为
@@ -183,6 +198,11 @@ class BatchSearchThread(QThread):
         self.api = api
         self.id_list = id_list
         self.check_resources = check_resources
+        self._stop = False
+
+    def stop(self):
+        """请求停止: 设置标志, 线程在请求边界处安全退出"""
+        self._stop = True
 
     def run(self):
         try:
@@ -193,6 +213,8 @@ class BatchSearchThread(QThread):
 
             self.progress_signal.emit(5, "加载宠物字典...")
             d = self.api._load_dict()
+            if self._stop:
+                return
 
             self.progress_signal.emit(20, f"筛选 {total} 个ID...")
             # 第一步: 字典查名字, 找不到的用 #ID 兜底
@@ -213,12 +235,16 @@ class BatchSearchThread(QThread):
                 self.progress_signal.emit(40, f"检测 {len(candidates)} 个ID的资源...")
                 valid = []
                 for i, (pid, name) in enumerate(candidates):
+                    if self._stop:
+                        return
                     if i % 10 == 0:
                         pct = 40 + int((i / len(candidates)) * 55)
                         self.progress_signal.emit(pct, f"检测资源 {i+1}/{len(candidates)}...")
                     resources = self.api.get_pet_resources(pid)
                     if resources:
                         valid.append((pid, name))
+                if self._stop:
+                    return
                 self.progress_signal.emit(100, f"检测完成: {len(valid)}/{len(candidates)} 个有资源")
                 self.result_signal.emit(valid)
             else:
@@ -257,10 +283,13 @@ class DetectThread(QThread):
 
 
 class DownloadThread(QThread):
-    """下载线程"""
+    """下载线程 (并发下载 + 失败自动重试 + 可停止)"""
     progress_signal = pyqtSignal(int, str)
     finished_signal = pyqtSignal(bool, str)
     files_signal = pyqtSignal(list)
+
+    MAX_WORKERS = 4   # 并发下载数
+    MAX_RETRIES = 3   # 单个文件失败重试次数
 
     def __init__(self, api, pet_id, download_dir, items):
         super().__init__()
@@ -268,27 +297,58 @@ class DownloadThread(QThread):
         self.pet_id = pet_id
         self.download_dir = download_dir
         self.items = items  # list of resource dict
+        self._stop = False
+
+    def stop(self):
+        """请求停止: 设置标志, 线程在文件边界处安全退出"""
+        self._stop = True
+
+    def _download_one(self, item, session):
+        """下载单个资源, 失败自动重试. 返回 (保存路径或None, 资源path)"""
+        path = item["path"]
+        sub_dir = os.path.join(self.download_dir, self.pet_id, item["type"])
+        os.makedirs(sub_dir, exist_ok=True)
+        for attempt in range(self.MAX_RETRIES):
+            if self._stop:
+                return None, path
+            f = self.api.download_resource(path, sub_dir, session=session)
+            if f:
+                return f, path
+        return None, path
 
     def run(self):
         try:
             saved_files = []
             total = len(self.items)
-            for i, item in enumerate(self.items):
-                path = item["path"]
-                self.progress_signal.emit(
-                    int((i / total) * 100) if total > 0 else 0,
-                    f"下载: {os.path.basename(path)}"
-                )
-                # 按类型分目录
-                sub_dir = os.path.join(self.download_dir, self.pet_id, item["type"])
-                os.makedirs(sub_dir, exist_ok=True)
-                f = self.api.download_resource(path, sub_dir)
-                if f:
-                    saved_files.append(f)
-                else:
-                    self.finished_signal.emit(False, f"下载失败(HTTP错误或空内容): {path}")
-                    return
-
+            if total == 0:
+                self.finished_signal.emit(True, "没有需要下载的文件")
+                return
+            # 独立会话, 避免多线程共享同一 Session 引发竞争
+            session = self.api.make_session()
+            done = 0
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self.MAX_WORKERS) as pool:
+                futures = {pool.submit(self._download_one, item, session): item
+                           for item in self.items}
+                for fut in concurrent.futures.as_completed(futures):
+                    if self._stop:
+                        # 放弃未开始的任务, 尽快退出
+                        for f in futures:
+                            f.cancel()
+                        break
+                    f, path = fut.result()
+                    done += 1
+                    self.progress_signal.emit(
+                        int(done / total * 100), f"下载: {os.path.basename(path)}")
+                    if f:
+                        saved_files.append(f)
+                    else:
+                        self.finished_signal.emit(
+                            False, f"下载失败(已重试{self.MAX_RETRIES}次): {path}")
+                        return
+            if self._stop:
+                self.finished_signal.emit(False, "下载已取消")
+                return
             self.progress_signal.emit(100, "下载完成")
             self.files_signal.emit(saved_files)
             self.finished_signal.emit(True, f"成功下载 {len(saved_files)} 个文件")
@@ -363,6 +423,9 @@ class WallpaperThread(QThread):
     @staticmethod
     def _extract_palette(png_path, num_colors=4):
         """从PNG提取主色调 - 保持原色调,仅做适度压暗以适合做背景"""
+        # AI 超分会重绘像素颜色导致取色偏差, 优先用放大前的原始图(.bak)保证色彩准确
+        if png_path and os.path.exists(png_path + ".bak"):
+            png_path = png_path + ".bak"
         try:
             from PIL import Image
             img = Image.open(png_path).convert('RGBA')
@@ -533,6 +596,14 @@ class WallpaperThread(QThread):
         if mode == 8:
             # 噪点颗粒: body 只放渐变底, 颗粒覆盖层由 EXTRA_CSS 注入
             return WallpaperThread._make_gradient(palette, "monet")
+        if mode == 9:
+            # 星空飞行: 星云渐变底(兜底), 动画星点由 EXTRA_HTML 注入
+            return (
+                "background: radial-gradient(ellipse at 20% 30%, #1a1a3e 0%, transparent 55%),"
+                "radial-gradient(ellipse at 80% 20%, #2a1a4e 0%, transparent 50%),"
+                "radial-gradient(ellipse at 50% 70%, #0f1a2e 0%, transparent 60%),"
+                "#050510;"
+            )
         # 未知 mode 兜底
         return WallpaperThread._make_gradient(palette, "monet")
 
@@ -681,6 +752,41 @@ class WallpaperThread(QThread):
             "z-index: 0; pointer-events: none; }"
         )
 
+    @staticmethod
+    def _compute_starfield_extra():
+        """生成星空飞行动画的 HTML+JS (canvas + 脚本), 注入到 EXTRA_CSS 占位符"""
+        return """<canvas id="sf-canvas" style="position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;"></canvas>
+<script>
+(function(){
+var c=document.getElementById('sf-canvas');
+var x=c.getContext('2d');
+var w,h,S=[];
+function R(){w=c.width=window.innerWidth;h=c.height=window.innerHeight;}
+R();window.addEventListener('resize',R);
+for(var i=0;i<350;i++)S.push({x:(Math.random()-0.5)*2*w,y:(Math.random()-0.5)*2*h,z:0.1+Math.random()*5,p:Math.random()*6.28,s:0.008+Math.random()*0.04});
+function D(){
+x.fillStyle='rgba(2,3,12,0.15)';x.fillRect(0,0,w,h);
+S.sort(function(a,b){return b.z-a.z;});
+for(var i=0;i<S.length;i++){
+var s=S[i];s.z-=0.018;
+if(s.z<=0.05){s.x=(Math.random()-0.5)*2*w;s.y=(Math.random()-0.5)*2*h;s.z=4.5+Math.random()*0.5;s.p=Math.random()*6.28;}
+var k=140/s.z,px=s.x*k+w/2,py=s.y*k+h/2;
+if(px<-20||px>w+20||py<-20||py>h+20)continue;
+var d=1-s.z/5;s.p+=s.s;var f=0.6+0.4*Math.sin(s.p);
+var sz=Math.max(0.5,d*4.5),al=d*f;
+var cr=140+d*115,cg=120+d*135,cb=180+d*75;
+var g=x.createRadialGradient(px,py,0,px,py,sz*2.5);
+g.addColorStop(0,'rgba('+(cr|0)+','+(cg|0)+','+(cb|0)+','+(al*0.55)+')');
+g.addColorStop(1,'rgba(0,0,0,0)');
+x.fillStyle=g;x.beginPath();x.arc(px,py,sz*2.5,0,6.28);x.fill();
+x.beginPath();x.arc(px,py,sz*0.3,0,6.28);x.fillStyle='rgba(255,255,255,'+(al*0.85)+')';x.fill();
+}
+requestAnimationFrame(D);
+}
+D();
+})();
+</script>"""
+
     def run(self):
         try:
             pet_id = self.pet_id
@@ -701,6 +807,17 @@ class WallpaperThread(QThread):
             png_file = files["texture"]
             skel_type = "json" if skel_file.lower().endswith(".json") else "binary"
 
+            # AI 超分放大 (如果选择了算法, settings 中为 (算法key, 倍率))
+            upscale_algo = self.settings.get("upscale_algorithm", "none")
+            if upscale_algo and upscale_algo != "none":
+                algo, scale = upscale_algo
+                try:
+                    png_file, atlas_file = upscale_spine_assets(
+                        png_file, atlas_file, scale=scale, algorithm=algo
+                    )
+                except Exception as e:
+                    print(f"[WallpaperThread] AI 超分失败: {e}, 使用原图")
+
             self.progress_signal.emit(40, "复制Spine运行时...")
             # 复制 spine-webgl.js
             src_runtime = os.path.join(BASE_DIR, "web", "spine-webgl.js")
@@ -718,6 +835,7 @@ class WallpaperThread(QThread):
             bg_color = self.settings.get("bg_color", "#000000")
             bg_image = self.settings.get("bg_image", "")
             extra_css = ""
+            extra_html = ""
             real_png = png_file if png_file and os.path.exists(png_file) else None
             if bg_mode == 4:
                 # 自定义图片模式: 复制背景图到输出目录
@@ -733,6 +851,10 @@ class WallpaperThread(QThread):
                 # 噪点颗粒: 渐变底 + 噪点覆盖层
                 bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
                 extra_css = WallpaperThread._compute_grain_extra_css()
+            elif bg_mode == 9:
+                # 星空飞行: 暗色底 + canvas 动画星点 (注入到 body 内的 EXTRA_HTML)
+                bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+                extra_html = WallpaperThread._compute_starfield_extra()
             else:
                 if real_png:
                     bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
@@ -744,6 +866,7 @@ class WallpaperThread(QThread):
                       .replace("{{SKEL_TYPE}}", skel_type) \
                       .replace("{{BG_CSS}}", bg_css) \
                       .replace("{{EXTRA_CSS}}", extra_css) \
+                      .replace("{{EXTRA_HTML}}", extra_html) \
                       .replace("{{BG_COLOR}}", bg_color) \
                       .replace("{{CAMERA_SCALE}}", str(self.settings.get("scale", 1.0))) \
                       .replace("{{CAMERA_OFFSET_X}}", str(self.settings.get("offset_x", 0))) \
@@ -1011,29 +1134,83 @@ class MainWindow(QMainWindow):
         self.current_resources = []
         self.current_saved_files = []
         self._auto_download = False
+        self._shadow_targets = []
 
         self.download_dir = os.path.join(_get_data_dir(), "downloads")
         self.wallpapers_dir = os.path.join(_get_data_dir(), "wallpapers")
+
+        # 主题: 从 ui_config.ini 恢复上次选择
+        self._current_theme = self._load_ui_config()
 
         self.setWindowTitle("奥拉星立绘提取器 v2.0")
         self.setMinimumSize(1100, 720)
         self._build_ui()
         self._apply_style()
+        self._apply_shadows()
         self.update_bg_preview()
 
+    def _load_ui_config(self):
+        """读取 ui_config.ini 中的主题设置, 无效时回退默认主题."""
+        cfg = configparser.ConfigParser()
+        theme = themes.DEFAULT_THEME
+        path = _ui_config_path()
+        if os.path.exists(path):
+            try:
+                cfg.read(path, encoding="utf-8")
+                theme = cfg.get("ui", "theme", fallback=themes.DEFAULT_THEME)
+            except Exception:
+                pass
+        return theme if themes.is_valid(theme) else themes.DEFAULT_THEME
+
+    def _save_ui_config(self):
+        """持久化当前主题."""
+        cfg = configparser.ConfigParser()
+        cfg["ui"] = {"theme": self._current_theme}
+        try:
+            with open(_ui_config_path(), "w", encoding="utf-8") as f:
+                cfg.write(f)
+        except Exception:
+            pass
+
     def _apply_style(self):
-        # 从 style.qss 文件加载样式，避免代码中长字符串导致 PyInstaller 解析错误
+        # 从 style.qss 模板渲染当前主题, 避免代码中长字符串导致 PyInstaller 解析错误
         qss_path = os.path.join(BASE_DIR, "style.qss")
         if os.path.exists(qss_path):
             try:
-                with open(qss_path, "r", encoding="utf-8") as f:
-                    qss = f.read()
+                qss = themes.render_qss(self._current_theme, qss_path)
                 self.setStyleSheet(qss)
                 return
             except Exception:
                 pass
         # 回退: 空样式 (使用 Qt 默认主题)
         self.setStyleSheet("")
+
+    def _apply_shadows(self):
+        """给主要面板加 QGraphicsDropShadowEffect 真实柔和阴影.
+
+        QSS 不支持 box-shadow, 用 Qt 原生效果类补偿, 并按主题定制阴影参数
+        (retro 主题 blur=0 + 偏移, 还原 TieZ 的硬边像素阴影).
+        重复调用会替换旧效果, 无需手动清理.
+        """
+        s = themes.get_shadow(self._current_theme)
+        color = QColor(s["color"])
+        for w in self._shadow_targets:
+            if w is None:
+                continue
+            eff = QGraphicsDropShadowEffect(self)
+            eff.setBlurRadius(s["blur"])
+            eff.setOffset(s["dx"], s["dy"])
+            eff.setColor(color)
+            w.setGraphicsEffect(eff)
+
+    def _on_theme_changed(self, index):
+        """顶部主题下拉框切换: 重渲染 QSS 并持久化."""
+        theme_id = self.cbo_theme.currentData()
+        if theme_id != self._current_theme:
+            self._current_theme = theme_id
+            self._save_ui_config()
+            self._apply_style()
+            self._apply_shadows()
 
     def _build_ui(self):
         central = QWidget()
@@ -1045,66 +1222,54 @@ class MainWindow(QMainWindow):
         sb_layout = QHBoxLayout(search_box)
         sb_layout.addWidget(QLabel("ID或名称:"))
         self.input_search = QLineEdit()
-        self.input_search.setPlaceholderText("单ID: 5943  区间: 5000-6000  多ID: 5000,5001,5002")
+        self.input_search.setPlaceholderText("单ID: 5943  名称: 帝皇龙  区间: 5000-6000  多ID: 5000,5001")
         self.input_search.returnPressed.connect(self.on_search)
         sb_layout.addWidget(self.input_search, 1)
 
-        # 批量模式复选框
-        self.chk_batch = QCheckBox("批量模式")
-        self.chk_batch.setToolTip("输入ID区间或多个ID, 搜索字典中所有匹配的宠物")
-        self.chk_batch.stateChanged.connect(self._on_batch_mode_changed)
-        sb_layout.addWidget(self.chk_batch)
-
-        # 批量检测资源复选框 (仅批量模式可用)
+        # 批量检测资源复选框 — 用户要求隐藏(点不动且界面简洁)
         self.chk_check_res = QCheckBox("检测资源")
         self.chk_check_res.setToolTip("只显示有立绘资源的宠物 (较慢, 需联网)")
         self.chk_check_res.setEnabled(False)
+        self.chk_check_res.setVisible(False)
         sb_layout.addWidget(self.chk_check_res)
 
         self.btn_search = QPushButton("搜索")
         self.btn_search.setObjectName("btnSearch")
         self.btn_search.clicked.connect(self.on_search)
         sb_layout.addWidget(self.btn_search)
+
+        # 主题选择 (借鉴 TieZ 设计令牌, 切换即重渲染 style.qss 模板)
+        sb_layout.addSpacing(6)
+        sb_layout.addWidget(QLabel("主题:"))
+        self.cbo_theme = QComboBox()
+        for tid, tname in themes.THEMES:
+            self.cbo_theme.addItem(tname, tid)
+        idx = themes.THEME_IDS.index(self._current_theme)
+        self.cbo_theme.setCurrentIndex(idx)
+        self.cbo_theme.setToolTip("切换界面主题, 立即生效并记忆")
+        self.cbo_theme.currentIndexChanged.connect(self._on_theme_changed)
+        sb_layout.addWidget(self.cbo_theme)
+
         root.addWidget(search_box)
 
         # ===== 中间: 主工作区 =====
         splitter = QSplitter(Qt.Horizontal)
 
         # 统一的三栏标题样式：相同高度/字重，保证顶部 baseline 对齐
+        # (样式定义在 style.qss 的 QLabel#lblSection, 随主题令牌变化)
         def _section_label(text):
             lb = QLabel(text)
+            lb.setObjectName("lblSection")
             lb.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             lb.setFixedHeight(22)
-            lb.setStyleSheet(
-                "font-weight: 600; color: #94e3eb; font-size: 13px;"
-                "letter-spacing: 0.5px;"
-            )
             return lb
-
-        # 统一的"头部框"外观（同 padding / 圆角 / min-height），
-        # 让 宠物信息框 与 预览框 视觉顶边/高度对齐
-        _HEAD_MIN_H = 56
-        _HEAD_STYLE = (
-            "padding: 10px 14px;"
-            "background: #252940;"
-            "border: 1px solid #3a5a7a;"
-            "border-radius: 8px;"
-        )
 
         # 统一的"内容面板"容器：list + 按钮等内容包进一个卡片，
         # 与 宠物信息/预览/壁纸参数 的外围容器视觉完全统一
+        # (样式定义在 style.qss 的 QFrame#panelFrame, 随主题令牌变化)
         def _panel_widget():
             frame = QFrame()
-            frame.setStyleSheet(
-                "QFrame {"
-                "  background: #252940;"
-                "  border: 1px solid #3a5a7a;"
-                "  border-radius: 8px;"
-                "}"
-                # 让 list / button 放在 panel 里无边框无底色，避免双重描边
-                "QFrame QListWidget { border: none; background: transparent; }"
-                "QFrame QPushButton { margin-top: 6px; }"
-            )
+            frame.setObjectName("panelFrame")
             lay = QVBoxLayout(frame)
             lay.setContentsMargins(8, 8, 8, 8)
             lay.setSpacing(8)
@@ -1124,20 +1289,36 @@ class MainWindow(QMainWindow):
         self.btn_detect.clicked.connect(self.on_detect_resources)
         rp_lay.addWidget(self.btn_detect)
         ll.addWidget(results_panel, 1)
+        self._shadow_targets.append(results_panel)
         splitter.addWidget(left)
 
-        # 中间: 资源列表 + 信息
+        # 中间: 预览区 (占中心大面积)
         mid = QWidget()
         ml = QVBoxLayout(mid)
         ml.setContentsMargins(0, 0, 0, 0)
         ml.setSpacing(8)
-        ml.addWidget(_section_label("宠物信息"))
+        ml.addWidget(_section_label("预览"))
+        self.label_preview = QLabel("下载后显示预览")
+        self.label_preview.setObjectName("label_preview")
+        self.label_preview.setAlignment(Qt.AlignCenter)
+        self.label_preview.setMinimumHeight(240)
+        self._shadow_targets.append(self.label_preview)
+        ml.addWidget(self.label_preview, 1)
+        splitter.addWidget(mid)
+
+        # 右侧: 宠物信息 + 可用资源(右上角小块) + 壁纸设置
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(8)
+        rl.addWidget(_section_label("宠物信息"))
         self.label_pet_info = QLabel("(未选择)")
+        self.label_pet_info.setObjectName("label_pet_info")
         self.label_pet_info.setWordWrap(True)
-        self.label_pet_info.setMinimumHeight(_HEAD_MIN_H)
-        self.label_pet_info.setStyleSheet(_HEAD_STYLE + "color: #ffffff;")
-        ml.addWidget(self.label_pet_info)
-        ml.addWidget(_section_label("可用资源"))
+        self.label_pet_info.setMinimumHeight(56)
+        self._shadow_targets.append(self.label_pet_info)
+        rl.addWidget(self.label_pet_info)
+        rl.addWidget(_section_label("可用资源"))
         resources_panel, rsp_lay = _panel_widget()
         self.list_resources = QListWidget()
         rsp_lay.addWidget(self.list_resources, 1)
@@ -1158,23 +1339,14 @@ class MainWindow(QMainWindow):
         self.btn_download_all.clicked.connect(self.on_download_all)
         res_btns.addWidget(self.btn_download_all)
         rsp_lay.addLayout(res_btns)
-        ml.addWidget(resources_panel, 1)
-        splitter.addWidget(mid)
-
-        # 右侧: 预览区 + 壁纸设置
-        right = QWidget()
-        rl = QVBoxLayout(right)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(8)
-        rl.addWidget(_section_label("预览"))
-        self.label_preview = QLabel("下载后显示预览")
-        self.label_preview.setAlignment(Qt.AlignCenter)
-        self.label_preview.setMinimumHeight(_HEAD_MIN_H + 144)  # 比 info 框高一些但顶边对齐
-        self.label_preview.setStyleSheet(_HEAD_STYLE + "color: #cccccc;")
-        rl.addWidget(self.label_preview)
+        # 可用资源占小位置: 限制列表高度, 不随窗口拉伸
+        self.list_resources.setMaximumHeight(150)
+        rl.addWidget(resources_panel)
+        self._shadow_targets.append(resources_panel)
 
         # 壁纸参数设置
         wp_box = QGroupBox("壁纸参数设置")
+        self._shadow_targets.append(wp_box)
         wp_form = QFormLayout(wp_box)
 
         # 背景模式
@@ -1197,30 +1369,51 @@ class MainWindow(QMainWindow):
         self.input_bg_image.textChanged.connect(self.update_bg_preview)
         self.btn_pick_image = QPushButton("浏览")
         self.btn_pick_image.clicked.connect(self.on_pick_bg_image)
+        # 图片缩略色卡 (与背景色行色卡同尺寸同风格, 仅图片模式显示)
+        self.lbl_img_preview = QLabel()
+        self.lbl_img_preview.setObjectName("lbl_img_preview")
+        self.lbl_img_preview.setFixedSize(72, 28)
+        self.lbl_img_preview.setAlignment(Qt.AlignCenter)
+        self.lbl_img_preview.setToolTip("图片预览")
         img_row = QHBoxLayout()
-        img_row.addWidget(self.input_bg_image)
+        img_row.setSpacing(6)
+        img_row.addWidget(self.input_bg_image, 1)
         img_row.addWidget(self.btn_pick_image)
+        img_row.addWidget(self.lbl_img_preview)
         self.img_row_widget = QWidget()
         self.img_row_widget.setLayout(img_row)
         wp_form.addRow("背景图片:", self.img_row_widget)
+        # 记住行标签, 非图片模式下连同文字一起隐藏
+        self._img_row_label = wp_form.labelForField(self.img_row_widget)
         self.img_row_widget.setVisible(False)
+        if self._img_row_label:
+            self._img_row_label.setVisible(False)
 
         self.input_bg_color = QLineEdit("#000000")
         self.btn_pick_color = QPushButton("选色")
         self.btn_pick_color.clicked.connect(self.on_pick_color)
+        # 小色卡实时预览当前背景 (72x28, 与输入框同一行, 避免整行大色块)
+        self.lbl_bg_preview = QLabel()
+        self.lbl_bg_preview.setObjectName("lbl_bg_preview")
+        self.lbl_bg_preview.setFixedSize(72, 28)
+        self.lbl_bg_preview.setAlignment(Qt.AlignCenter)
+        self.lbl_bg_preview.setToolTip("背景预览")
         color_row = QHBoxLayout()
-        color_row.addWidget(self.input_bg_color)
+        color_row.setSpacing(6)
+        color_row.addWidget(self.input_bg_color, 1)
         color_row.addWidget(self.btn_pick_color)
+        color_row.addWidget(self.lbl_bg_preview)
         wp_form.addRow("背景色:", color_row)
 
-        # 预览当前背景
-        self.lbl_bg_preview = QLabel("  背景预览  ")
-        self.lbl_bg_preview.setMinimumHeight(40)
-        self.lbl_bg_preview.setStyleSheet(
-            "border: 1px solid #3a5a7a;"
-            "border-radius: 7px;")
-        self.lbl_bg_preview.setAlignment(Qt.AlignCenter)
-        wp_form.addRow("背景预览:", self.lbl_bg_preview)
+        # AI 超分放大 (data=(算法key, 倍率))
+        self.cbo_upscale = QComboBox()
+        self.cbo_upscale.addItem("无 (原始尺寸)", "none")
+        for key, label in ALGORITHMS.items():
+            self.cbo_upscale.addItem(f"{label} (2x)", (key, 2))
+            self.cbo_upscale.addItem(f"{label} (4x)", (key, 4))
+        self.cbo_upscale.setCurrentIndex(0)
+        self.cbo_upscale.setToolTip("选择超分放大算法与倍率, 将纹理图放大后再生成壁纸")
+        wp_form.addRow("AI 超分:", self.cbo_upscale)
 
         self.spin_scale = QDoubleSpinBox()
         self.spin_scale.setRange(0.1, 5.0)
@@ -1280,7 +1473,7 @@ class MainWindow(QMainWindow):
         rl.addStretch()
         splitter.addWidget(right)
 
-        splitter.setSizes([200, 380, 420])
+        splitter.setSizes([200, 620, 300])
         root.addWidget(splitter, 1)
 
         # ===== 底部: 日志 + 进度 =====
@@ -1305,6 +1498,14 @@ class MainWindow(QMainWindow):
     def log_msg(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_text.append(f"[{ts}] {msg}")
+        # 限制日志行数, 防止批量搜索等大量日志导致界面卡顿 (最多保留500行)
+        doc = self.log_text.document()
+        if doc.blockCount() > 500:
+            cursor = QTextCursor(doc)
+            cursor.movePosition(QTextCursor.Start)
+            cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, 100)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
 
     def get_current_pet_id(self):
         if self.current_pet_id:
@@ -1315,24 +1516,14 @@ class MainWindow(QMainWindow):
         return None
 
     # ============ 搜索 ============
-    def _on_batch_mode_changed(self, state):
-        """批量模式切换时更新placeholder和复选框"""
-        if state == Qt.Checked:
-            self.input_search.setPlaceholderText("单ID: 5943  区间: 5000-6000  多ID: 5000,5001,5002  混合: 5000-5010,6000-6005")
-            self.chk_check_res.setEnabled(True)
-        else:
-            self.input_search.setPlaceholderText("单ID: 5943  区间: 5000-6000  多ID: 5000,5001,5002")
-            self.chk_check_res.setEnabled(False)
-            self.chk_check_res.setChecked(False)
-
     def on_search(self):
         keyword = self.input_search.text().strip()
         if not keyword:
             QMessageBox.warning(self, "提示", "请输入ID或名称")
             return
 
-        # 批量模式: 解析ID列表, 批量搜索
-        if self.chk_batch.isChecked():
+        # 输入含 "-" 或 "," 时自动按区间/多ID批量搜索, 无需手动切换
+        if "-" in keyword or "," in keyword:
             id_list = parse_id_range(keyword)
             if not id_list:
                 QMessageBox.warning(self, "提示", "无法解析ID输入, 请使用: 5000-6000 或 5000,5001")
@@ -1598,8 +1789,6 @@ class MainWindow(QMainWindow):
                 self.label_preview.setPixmap(scaled)
             else:
                 self.label_preview.setText("下载完成\n(无可用预览图)")
-                self.label_preview.setStyleSheet(
-                    _HEAD_STYLE + "color: #888888;")
 
             self.statusBar().showMessage("下载完成")
         else:
@@ -1623,39 +1812,65 @@ class MainWindow(QMainWindow):
 
     def on_bg_mode_change(self, index):
         """背景模式切换时更新预览"""
-        # 自定义图片模式显示图片选择行
+        # 自定义图片模式显示图片选择行(连同行标签一起)
         mode = self.cbo_bg_mode.currentData()
-        self.img_row_widget.setVisible(mode == 4)
+        show = (mode == 4)
+        self.img_row_widget.setVisible(show)
+        if self._img_row_label:
+            self._img_row_label.setVisible(show)
         self.update_bg_preview()
 
     def update_bg_preview(self):
-        """更新背景预览标签"""
+        """更新背景预览色卡 (72x28; 图片模式: 图片行色卡显示缩略, 背景色行色卡显示底色)"""
         mode = self.cbo_bg_mode.currentData()
         if mode == 4:
             # 自定义图片模式
+            self.lbl_img_preview.setVisible(True)
             img_path = self.input_bg_image.text().strip()
             if img_path and os.path.isfile(img_path):
                 pix = QPixmap(img_path)
                 if not pix.isNull():
-                    scaled = pix.scaled(self.lbl_bg_preview.size(),
-                                        Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                    self.lbl_bg_preview.setPixmap(scaled)
-                    return
-            self.lbl_bg_preview.setText("  请选择背景图片  ")
+                    scaled = pix.scaled(self.lbl_img_preview.size(),
+                                        Qt.KeepAspectRatioByExpanding,
+                                        Qt.SmoothTransformation)
+                    x = (scaled.width() - self.lbl_img_preview.width()) // 2
+                    y = (scaled.height() - self.lbl_img_preview.height()) // 2
+                    self.lbl_img_preview.setPixmap(scaled.copy(
+                        x, y, self.lbl_img_preview.width(), self.lbl_img_preview.height()))
+                    self.lbl_img_preview.setToolTip("背景: " + img_path)
+                else:
+                    self.lbl_img_preview.clear()
+                    self.lbl_img_preview.setToolTip("无法加载图片")
+            else:
+                self.lbl_img_preview.clear()
+                self.lbl_img_preview.setToolTip("请选择背景图片")
+            # 背景色行色卡显示底色
+            color = self.input_bg_color.text().strip() or "#000000"
+            self.lbl_bg_preview.clear()
             self.lbl_bg_preview.setStyleSheet(
-                "border: 1px solid #3a5a7a;"
-                "border-radius: 7px; min-height: 40px;"
-                "color: #cccccc;")
+                themes.preview_border_style(self._current_theme) +
+                "background: " + color + ";"
+            )
+            self.lbl_bg_preview.setToolTip("底色 " + color)
             return
+        # 非图片模式: 图片行色卡隐藏, 背景色行色卡填充背景样式
+        self.lbl_img_preview.setVisible(False)
         self.lbl_bg_preview.clear()
         css = self._compute_background_css(self.input_bg_color.text().strip(), mode)
         self.lbl_bg_preview.setStyleSheet(
-            "border: 1px solid #3a5a7a;"
-            "border-radius: 7px; min-height: 40px; " + css
+            themes.preview_border_style(self._current_theme) + css
         )
+        # tooltip 显示背景摘要
+        mode_names = {0: "纯色", 1: "莫奈渐变", 2: "油画质感", 3: "自动取色",
+                      5: "毛玻璃", 6: "极光渐变", 7: "光斑散景", 8: "噪点颗粒"}
+        color = self.input_bg_color.text().strip() or "#000000"
+        self.lbl_bg_preview.setToolTip(mode_names.get(mode, "背景") + " " + color)
 
     def _extract_palette_from_png(self, png_path, num_colors=4):
         """从PNG图片提取主色调"""
+        # AI 超分会重绘像素颜色导致取色偏差, 优先用放大前的原始图(.bak)保证色彩准确
+        if png_path and os.path.exists(png_path + ".bak"):
+            png_path = png_path + ".bak"
         try:
             from PIL import Image
             img = Image.open(png_path).convert('RGBA')
@@ -1774,6 +1989,13 @@ class MainWindow(QMainWindow):
             if not palette:
                 palette = self._monet_palette_from_color(bg_color)
             return self._make_gradient_css(palette, "monet")
+        elif mode == 9:  # 星空飞行 - QLabel 预览用静态星空渐变
+            return (
+                "background: radial-gradient(ellipse at 20% 30%, #1a1a3e 0%, transparent 55%),"
+                "radial-gradient(ellipse at 80% 20%, #2a1a4e 0%, transparent 50%),"
+                "radial-gradient(ellipse at 50% 70%, #0f1a2e 0%, transparent 60%),"
+                "#050510;"
+            )
         return f"background: {bg_color};"
 
     def _monet_palette_from_color(self, color_str):
@@ -1862,7 +2084,26 @@ class MainWindow(QMainWindow):
             "offset_x": self.spin_offset_x.value(),
             "offset_y": self.spin_offset_y.value(),
             "resource_type": self.cbo_resource_type.currentData() or "spine_breath",
+            "upscale_algorithm": self.cbo_upscale.currentData(),
         }
+
+    def _apply_upscale(self, png_path, atlas_path):
+        """如果选择了超分算法, 放大纹理+更新 atlas, 返回 (png, atlas) 路径"""
+        choice = self.cbo_upscale.currentData()
+        if choice == "none":
+            return png_path, atlas_path
+        algo, scale = choice
+        try:
+            algo_label = ALGORITHMS.get(algo, algo)
+            self.log_msg(f"AI 超分 [{algo_label}] {scale}x 开始...")
+            png_path, atlas_path = upscale_spine_assets(
+                png_path, atlas_path, scale=scale, algorithm=algo
+            )
+            self.log_msg(f"AI 超分完成: {os.path.basename(png_path)}")
+            return png_path, atlas_path
+        except Exception as e:
+            self.log_msg(f"AI 超分失败: {e}, 使用原图")
+            return png_path, atlas_path
 
     # ============ 本地HTTP预览服务器 ============
     _preview_server = None
@@ -1931,6 +2172,39 @@ class MainWindow(QMainWindow):
             self.log_msg(f"启动HTTP服务器失败: {e}")
             raise
 
+    def closeEvent(self, event):
+        """关闭软件时: 停止后台线程 + 停止预览HTTP服务器 + 清理预览临时目录"""
+        # 1. 请求所有运行中的后台线程停止 (下载/批量搜索等, 防止崩溃与文件损坏)
+        for attr in ("thread_download", "thread_batch", "thread_search",
+                     "thread_detect", "thread_wp"):
+            t = getattr(self, attr, None)
+            if t is not None and t.isRunning():
+                stop = getattr(t, "stop", None)
+                if callable(stop):
+                    stop()
+        # 等待线程收尾 (stop 后各线程在文件/请求边界快速退出)
+        for attr in ("thread_download", "thread_batch", "thread_search",
+                     "thread_detect", "thread_wp"):
+            t = getattr(self, attr, None)
+            if t is not None and t.isRunning():
+                t.wait(4000)
+        # 2. 停止预览HTTP服务器, 释放文件占用, 便于删除
+        if self._preview_server:
+            try:
+                self._preview_server.shutdown()
+                self._preview_server.server_close()
+            except Exception:
+                pass
+            self._preview_server = None
+        # 3. 删除预览临时目录 (立绘资源较大, 每次关闭软件自动清理)
+        preview_root = os.path.join(self.download_dir, "preview")
+        try:
+            if os.path.isdir(preview_root):
+                shutil.rmtree(preview_root, ignore_errors=True)
+        except Exception:
+            pass
+        super().closeEvent(event)
+
     # ============ 预览动态立绘 ============
     def on_preview_spine(self):
         pid = self.current_pet_id or self.get_current_pet_id()
@@ -1962,6 +2236,9 @@ class MainWindow(QMainWindow):
         png_file = files["texture"]
         skel_type = "json" if skel_file.lower().endswith(".json") else "binary"
 
+        # AI 超分放大 (如果开启)
+        png_file, atlas_file = self._apply_upscale(png_file, atlas_file)
+
         # 复制 runtime
         src_runtime = os.path.join(BASE_DIR, "web", "spine-webgl.js")
         if os.path.exists(src_runtime):
@@ -1977,6 +2254,7 @@ class MainWindow(QMainWindow):
         bg_color = settings.get("bg_color", "#000000")
         bg_image = settings.get("bg_image", "")
         extra_css = ""
+        extra_html = ""
         real_png = png_file if png_file and os.path.exists(png_file) else None
         if bg_mode == 4:
             # 自定义图片模式: 复制背景图到预览目录
@@ -1991,6 +2269,10 @@ class MainWindow(QMainWindow):
             # 噪点颗粒: 渐变底 + 噪点覆盖层
             bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
             extra_css = WallpaperThread._compute_grain_extra_css()
+        elif bg_mode == 9:
+            # 星空飞行: 暗色底 + canvas 动画星点 (注入到 body 内的 EXTRA_HTML)
+            bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
+            extra_html = WallpaperThread._compute_starfield_extra()
         else:
             if real_png:
                 bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
@@ -2003,6 +2285,7 @@ class MainWindow(QMainWindow):
                   .replace("{{SKEL_TYPE}}", skel_type) \
                   .replace("{{BG_CSS}}", bg_css) \
                   .replace("{{EXTRA_CSS}}", extra_css) \
+                  .replace("{{EXTRA_HTML}}", extra_html) \
                   .replace("{{BG_COLOR}}", bg_color) \
                   .replace("{{CAMERA_SCALE}}", str(settings["scale"])) \
                   .replace("{{CAMERA_OFFSET_X}}", str(settings["offset_x"])) \
@@ -2094,6 +2377,9 @@ class MainWindow(QMainWindow):
         png_file = files["texture"]
         skel_type = "json" if skel_file.lower().endswith(".json") else "binary"
 
+        # AI 超分放大 (如果开启)
+        png_file, atlas_file = self._apply_upscale(png_file, atlas_file)
+
         # 复制 runtime
         src_runtime = os.path.join(BASE_DIR, "web", "spine-webgl.js")
         if os.path.exists(src_runtime):
@@ -2123,6 +2409,9 @@ class MainWindow(QMainWindow):
         elif bg_mode == 8:
             bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
             extra_css = WallpaperThread._compute_grain_extra_css()
+        elif bg_mode == 9:
+            # 星空飞行: GIF 帧背景由 JS 端 renderBackgroundToCanvas 渲染, 不注入额外 HTML
+            bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
         else:
             if real_png:
                 bg_css = WallpaperThread._compute_bg_css(bg_color, bg_mode, real_png)
@@ -2288,7 +2577,21 @@ def main():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    # 单实例保护: 防止重复打开多个实例互相干扰 (同写preview目录/端口冲突等)
+    _lock = QLockFile(os.path.join(_get_data_dir(), "app.lock"))
+    if not _lock.tryLock(100):
+        QMessageBox.warning(None, "提示", "软件已在运行中, 请勿重复打开")
+        sys.exit(0)
+
     win = MainWindow()
+    # Windows 11 风格窗口: 圆角标题栏 + 现代控制按钮 (深色主题配深色标题栏)
+    if pywinstyles is not None:
+        try:
+            dark = win._current_theme in ("deepspace", "acrylic", "retro")
+            pywinstyles.apply_style(win, "win11", dark_mode=dark)
+        except Exception as e:
+            print(f"[pywinstyles] 应用窗口样式失败, 已降级: {e}")
     win.show()
     sys.exit(app.exec_())
 

@@ -193,20 +193,34 @@ class AolaAPI:
             return False
 
     # ============ 下载 ============
-    def download_resource(self, path, out_dir, filename=None):
+    @staticmethod
+    def make_session():
+        """创建独立请求会话 (并发下载时各线程使用, 避免共享 Session 跨线程竞争)"""
+        s = requests.Session()
+        s.trust_env = False
+        s.proxies = {}
+        s.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            "Referer": BASE_URL,
+        })
+        return s
+
+    def download_resource(self, path, out_dir, filename=None, session=None):
         """下载单个资源到本地
 
         Args:
             path: 资源相对路径(如 petfightassets/spine/pet5943/pet5943.png)
             out_dir: 输出目录
             filename: 自定义文件名(默认用原文件名)
+            session: 独立会话(并发下载时传入, 默认用自身 Session)
 
         Returns:
             保存的文件路径,失败返回None
         """
         url = BASE_URL + path
         try:
-            r = self.session.get(url, timeout=30, verify=False)
+            r = (session or self.session).get(url, timeout=30, verify=False)
             if r.status_code == 200 and len(r.content) > 0:
                 os.makedirs(out_dir, exist_ok=True)
                 name = filename or os.path.basename(path)
@@ -257,11 +271,29 @@ class AolaAPI:
         if f:
             files["atlas"] = f
 
-        # 下载 .png
+        # 下载 .png (主纹理)
         path = path_template.format(id=pid, ext="png")
         f = self.download_resource(path, out_dir, f"{name_prefix}.png")
         if f:
             files["texture"] = f
+
+        # 下载 atlas 引用的附加纹理页 (多页 atlas, 如 petmovie60222.png)
+        atlas_path = files.get("atlas")
+        if atlas_path:
+            main_name = f"{name_prefix}.png"
+            base_rel = path_template.format(id=pid, ext="png")  # 主纹理相对路径
+            dir_rel = base_rel.rsplit("/", 1)[0] + "/"
+            try:
+                with open(atlas_path, "r", encoding="utf-8") as af:
+                    for line in af:
+                        name = line.strip()
+                        if name.endswith(".png") and name != main_name:
+                            # 附加纹理 URL = 主纹理目录 + atlas 引用的文件名
+                            extra = self.download_resource(dir_rel + name, out_dir, name)
+                            if not extra:
+                                print(f"[AolaAPI] 附加纹理下载失败: {dir_rel + name}")
+            except Exception as e:
+                print(f"[AolaAPI] 解析 atlas 附加纹理失败: {e}")
 
         success = "skeleton" in files and "atlas" in files and "texture" in files
         return success, files

@@ -44,12 +44,21 @@
         display: block;
         position: absolute; inset: 0;
         width: 100%; height: 100%;
+        z-index: 2;
     }
 
     #bg-layer {
         position: absolute; inset: 0;
         {{BG_CSS}}
         z-index: 0;
+    }
+
+    /* 星空飞行动态预览层 (仅 BG_MODE==9 时由 JS 绘制) */
+    #sf-bg-canvas {
+        position: absolute; inset: 0;
+        width: 100%; height: 100%;
+        z-index: 0;
+        pointer-events: none;
     }
 
     {{EXTRA_CSS}}
@@ -449,6 +458,7 @@
 
 <div id="bg-layer"></div>
 <div class="bg-deco"><div class="grid-lines"></div></div>
+<canvas id="sf-bg-canvas"></canvas>
 <canvas id="canvas"></canvas>
 
 <div id="controls">
@@ -504,6 +514,88 @@ var CAMERA_OFFSET_Y = {{CAMERA_OFFSET_Y}};
 
 var _bgImage = null;
 var _bgImageLoaded = false;
+
+// ===== 3D 星空飞行引擎 (复刻 pygame starfield: Z轴推进 + 透视投影, 越近越大越亮) =====
+var _sfStars = null, _sfW = 0, _sfH = 0, _sfGlow = null;
+function _sfGetGlow() {
+    // 预渲染光晕精灵图: 大幅降低每帧创建径向渐变的开销
+    if (_sfGlow) return _sfGlow;
+    _sfGlow = document.createElement('canvas');
+    _sfGlow.width = _sfGlow.height = 64;
+    var g = _sfGlow.getContext('2d');
+    var grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grd.addColorStop(0, 'rgba(255,255,255,0.9)');
+    grd.addColorStop(0.4, 'rgba(210,220,255,0.35)');
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, 64, 64);
+    return _sfGlow;
+}
+function _sfEnsure(w, h) {
+    if (_sfStars && _sfW === w && _sfH === h) return;
+    _sfW = w; _sfH = h;
+    var maxZ = Math.max(w, h);
+    // 数量自适应, 限制在 200~700 避免高分辨率下性能爆掉
+    var count = Math.max(200, Math.min(700, Math.round(w * h / 1200)));
+    _sfStars = [];
+    for (var i = 0; i < count; i++) {
+        _sfStars.push({
+            x: (Math.random() - 0.5) * 2 * w,
+            y: (Math.random() - 0.5) * 2 * h,
+            z: 1 + Math.random() * (maxZ - 1),
+            p: Math.random() * 6.28,
+            s: 0.01 + Math.random() * 0.05
+        });
+    }
+}
+// opaque=true: 录制时用不透明深色底; opaque=false: 预览时透明底, 让星云渐变 CSS 透出来
+function drawStarfield(ctx, w, h, step, opaque) {
+    _sfEnsure(w, h);
+    var maxZ = Math.max(w, h);
+    if (opaque) {
+        ctx.fillStyle = '#020308';
+        ctx.fillRect(0, 0, w, h);
+    } else {
+        ctx.clearRect(0, 0, w, h);
+    }
+    var glow = _sfGetGlow();
+    var stars = _sfStars;
+    for (var i = 0; i < stars.length; i++) {
+        var s = stars[i];
+        s.z -= step;  // 星星向前移动 (Z轴减小)
+        if (s.z <= 1) {
+            s.x = (Math.random() - 0.5) * 2 * w;
+            s.y = (Math.random() - 0.5) * 2 * h;
+            s.z = maxZ;
+            s.p = Math.random() * 6.28;
+        }
+        // 3D 投影到 2D 坐标
+        var k = 128 / s.z;
+        var px = s.x * k + w / 2;
+        var py = s.y * k + h / 2;
+        if (px < -10 || px > w + 10 || py < -10 || py > h + 10) continue;
+        // 越近尺寸越大、颜色越亮 (微蓝光)
+        var d = 1 - s.z / maxZ;
+        s.p += s.s;
+        var flick = 0.7 + 0.3 * Math.sin(s.p);
+        var size = Math.max(0.4, d * 4.5);
+        var alpha = d * flick;
+        var shade = Math.round(d * 255);
+        var cr = shade, cg = shade, cb = Math.min(255, shade + 50);
+        // 光晕精灵 (半透明白色光晕)
+        var glowR = size * 2.5;
+        ctx.globalAlpha = alpha * 0.55;
+        ctx.drawImage(glow, px - glowR, py - glowR, glowR * 2, glowR * 2);
+        // 彩色核心
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = 'rgb(' + cr + ',' + cg + ',' + cb + ')';
+        ctx.beginPath(); ctx.arc(px, py, size * 0.35, 0, 6.2832); ctx.fill();
+        // 白色亮点
+        ctx.fillStyle = 'rgba(255,255,255,' + (alpha * 0.85).toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(px, py, size * 0.16, 0, 6.2832); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+}
 
 function renderBackgroundToCanvas(ctx, w, h) {
     ctx.clearRect(0, 0, w, h);
@@ -602,6 +694,10 @@ function renderBackgroundToCanvas(ctx, w, h) {
             ctx.fillStyle = '#ffffff';
             ctx.fillRect(0, 0, w, h);
             ctx.restore();
+            break;
+        case 9: // 星空飞行: 3D透视动态星点 (复刻 pygame starfield)
+            // 录制时按 fps 归一化速度 (与60fps预览同速: 每秒240个单位), 不透明底色
+            drawStarfield(ctx, w, h, 4 * 60 / (window._gifFps || 60), true);
             break;
         default:
             ctx.fillStyle = BG_COLOR;
@@ -840,6 +936,20 @@ function render() {
         sceneRenderer.begin();
         sceneRenderer.drawSkeleton(skeleton, true);
         sceneRenderer.end();
+        // 星空飞行背景预览 (mode 9): 在底层 canvas 上逐帧绘制 3D 星点, 透明底露出星云渐变
+        if (BG_MODE === 9) {
+            try {
+                var sfC = document.getElementById('sf-bg-canvas');
+                if (sfC) {
+                    if (sfC.width !== canvas.width || sfC.height !== canvas.height) {
+                        sfC.width = canvas.width; sfC.height = canvas.height;
+                    }
+                    drawStarfield(sfC.getContext('2d'), sfC.width, sfC.height, 4, false);
+                }
+            } catch (e) {
+                // 星空绘制异常不影响立绘主循环
+            }
+        }
         requestAnimationFrame(render);
     } catch (e) {
         setStatus("渲染错误: " + e.message);
@@ -920,6 +1030,7 @@ recordBtn.addEventListener("click", async function() {
     var duration = parseFloat(document.getElementById("duration-input").value);
     var fps = parseInt(document.getElementById("fps-input").value);
     var totalFrames = Math.ceil(duration * fps);
+    window._gifFps = fps;  // 供 renderBackgroundToCanvas 归一化星空飞行速度
 
     var progressContainer = document.getElementById("progress-container");
     var progressFill = document.getElementById("progress-fill");
